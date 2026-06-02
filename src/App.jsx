@@ -1,0 +1,1384 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react'
+import { MapContainer, TileLayer, CircleMarker, Polyline, Popup, useMapEvents } from 'react-leaflet'
+import 'leaflet/dist/leaflet.css'
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const SUPPORTED_DAY_ROUTES   = ['11', '22', '33', '55', '88', '3', '25', '134']
+const SUPPORTED_NIGHT_ROUTES  = ['N11', 'N55']
+const DEFAULT_ROUTE           = 'all'
+const ARRIVALS_REFRESH_INTERVAL_MS = 30_000
+const DEAD_RECKONING_TICK_MS  = 1_000
+const TRAIL_LENGTH_SECONDS    = 40
+
+const LONDON_CENTER = [51.505, -0.09]
+const DEFAULT_ZOOM  = 12
+
+const DAY_TILE_URL   = 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png'
+const NIGHT_TILE_URL = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+const TILE_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+
+// Direction colours — single-route mode
+const OUTBOUND_COLOR = '#e67300'
+const INBOUND_COLOR  = '#2171b5'
+
+// Per-route colours — all-routes mode (bus dots + trails)
+const ROUTE_COLORS = {
+  // Original central routes
+  '11': '#d62828', '22': '#2a9d8f', '33': '#c8890a', '55': '#7b5ea7', '88': '#1d7ab5',
+  // Outer routes — distinct hues, different directions
+  '3':   '#ec4899',  // south  — hot pink
+  '25':  '#10b981',  // east   — emerald
+  '134': '#6366f1',  // north  — indigo
+  // Night routes — vivid, nocturnal palette
+  'N11': '#a855f7',  // electric purple
+  'N55': '#22d3ee',  // neon cyan
+}
+
+// Per-route lighter colours — OSRM route lines (subordinate to dots)
+const ROUTE_LINE_COLORS = {
+  '11': '#f08a8a', '22': '#82c4bc', '33': '#f5c84a', '55': '#b39fd4', '88': '#6baed6',
+  '3':   '#f9a8d4',  // soft pink
+  '25':  '#6ee7b7',  // soft emerald
+  '134': '#a5b4fc',  // soft indigo
+  'N11': '#d8b4fe',  // soft purple
+  'N55': '#a5f3fc',  // soft cyan
+}
+
+const ROUTE_DESTINATIONS = {
+  'all': 'All Routes',
+  '11': 'Liverpool St', '22': 'Piccadilly',    '33': 'Hammersmith',
+  '55': 'Oxford Circus', '88': 'Clapham Common',
+  '3':  'Crystal Palace', '25': 'Ilford',      '134': 'High Barnet',
+  'N11': 'Liverpool St', 'N55': 'Oxford Circus',
+}
+
+// London bus operating hours (approximate, for display only)
+const DAY_SERVICE_HOURS   = '05:30 – 00:30'
+const NIGHT_SERVICE_HOURS = '00:00 – 06:00'
+
+// ─── TfL & OSRM API helpers ───────────────────────────────────────────────────
+
+async function fetchArrivals(routeId) {
+  const response = await fetch(`https://api.tfl.gov.uk/Line/${routeId}/Arrivals`)
+  if (!response.ok) throw new Error(`TfL arrivals fetch failed: ${response.status}`)
+  return response.json()
+}
+
+async function fetchStopSequence(routeId, direction) {
+  const response = await fetch(`https://api.tfl.gov.uk/Line/${routeId}/Route/Sequence/${direction}`)
+  if (!response.ok) throw new Error(`TfL sequence fetch failed: ${response.status}`)
+  const data = await response.json()
+  const sequences = data.stopPointSequences
+  if (!sequences || sequences.length === 0) return []
+  const longest = sequences.reduce((best, seq) =>
+    seq.stopPoint.length > best.stopPoint.length ? seq : best
+  )
+  return longest.stopPoint.map(stop => ({
+    id: stop.id, name: stop.name, lat: stop.lat, lon: stop.lon,
+  }))
+}
+
+async function fetchOsrmRoute(stops) {
+  if (stops.length < 2) return null
+  const coordString = stops.map(s => `${s.lon},${s.lat}`).join(';')
+  const url = `https://router.project-osrm.org/route/v1/driving/${coordString}?overview=full&geometries=geojson`
+  const response = await fetch(url)
+  if (!response.ok) return null
+  const data = await response.json()
+  if (!data.routes || data.routes.length === 0) return null
+  return data.routes[0].geometry.coordinates.map(([lon, lat]) => [lat, lon])
+}
+
+// ─── Bus interpolation ────────────────────────────────────────────────────────
+
+function buildStopLookup(stops) {
+  const lookup = {}
+  stops.forEach(stop => {
+    lookup[stop.id] = stop
+    lookup[stop.id.replace(/^490/, '')] = stop
+  })
+  return lookup
+}
+
+// For each stop, find the index of the nearest vertex in the OSRM polyline.
+// Stored as { stopId: polylineIndex } so dead reckoning can interpolate on-road.
+function buildStopPolylineMap(stops, polyline) {
+  const map = {}
+  stops.forEach(stop => {
+    let minDist = Infinity
+    let nearestIdx = 0
+    polyline.forEach(([lat, lon], i) => {
+      const dist = Math.hypot(lat - stop.lat, lon - stop.lon)
+      if (dist < minDist) { minDist = dist; nearestIdx = i }
+    })
+    map[stop.id] = nearestIdx
+    map[stop.id.replace(/^490/, '')] = nearestIdx
+  })
+  return map
+}
+
+function interpolateBusData(arrivals, stopLookup) {
+  const vehicleGroups = {}
+  arrivals.forEach(a => {
+    if (!vehicleGroups[a.vehicleId]) vehicleGroups[a.vehicleId] = []
+    vehicleGroups[a.vehicleId].push(a)
+  })
+
+  const buses = []
+  Object.entries(vehicleGroups).forEach(([vehicleId, predictions]) => {
+    const sorted = [...predictions].sort((a, b) => a.timeToStation - b.timeToStation)
+    const next  = sorted[0]
+    const after = sorted[1]
+    if (!next || !after) return
+
+    const nextStop  = stopLookup[next.naptanId]  || stopLookup[next.stationId]
+    const afterStop = stopLookup[after.naptanId] || stopLookup[after.stationId]
+    if (!nextStop || !afterStop) return
+
+    const gapSeconds = after.timeToStation - next.timeToStation
+    if (gapSeconds <= 0) return
+
+    buses.push({
+      vehicleId, nextStop, afterStop,
+      timeToNextStop: next.timeToStation,
+      gapSeconds,
+      destination:  next.destinationName,
+      nextStopName: next.stationName || next.towards,
+      direction:    next.direction,
+    })
+  })
+  return buses
+}
+
+// ─── Road-snapped interpolation ───────────────────────────────────────────────
+// Traverses the OSRM polyline between two stop-mapped indices and returns
+// the lat/lon at parameter t (0 = fromIdx position, 1 = toIdx position).
+
+function interpolateAlongPolyline(polyline, fromIdx, toIdx, t) {
+  if (!polyline || fromIdx === undefined || toIdx === undefined) return null
+  if (fromIdx === toIdx) return { lat: polyline[fromIdx][0], lon: polyline[fromIdx][1] }
+
+  const ascending = fromIdx < toIdx
+  const slice = polyline.slice(
+    ascending ? fromIdx : toIdx,
+    (ascending ? toIdx : fromIdx) + 1,
+  )
+  const points = ascending ? slice : [...slice].reverse()
+
+  const distances = [0]
+  for (let i = 1; i < points.length; i++) {
+    const [lat1, lon1] = points[i - 1]
+    const [lat2, lon2] = points[i]
+    distances.push(distances[i - 1] + Math.hypot(lat2 - lat1, lon2 - lon1))
+  }
+
+  const totalDist = distances[distances.length - 1]
+  if (totalDist === 0) return { lat: points[0][0], lon: points[0][1] }
+
+  const targetDist = Math.min(t, 1) * totalDist
+  for (let i = 1; i < distances.length; i++) {
+    if (distances[i] >= targetDist) {
+      const segT = (targetDist - distances[i - 1]) / (distances[i] - distances[i - 1])
+      const [lat1, lon1] = points[i - 1]
+      const [lat2, lon2] = points[i]
+      return { lat: lat1 + (lat2 - lat1) * segT, lon: lon1 + (lon2 - lon1) * segT }
+    }
+  }
+
+  const last = points[points.length - 1]
+  return { lat: last[0], lon: last[1] }
+}
+
+// Find the index of the nearest vertex in a polyline to a given lat/lon.
+// Used to robustly snap stop positions onto the OSRM geometry.
+function findNearestPolylineIdx(lat, lon, polyline) {
+  let minDist = Infinity
+  let nearestIdx = 0
+  for (let i = 0; i < polyline.length; i++) {
+    const d = Math.hypot(polyline[i][0] - lat, polyline[i][1] - lon)
+    if (d < minDist) { minDist = d; nearestIdx = i }
+  }
+  return nearestIdx
+}
+
+// Extract the polyline segment that remains between the bus's current position
+// and its next stop. This is used to render the road-snapped reaching line.
+function extractReachingPolyline(lat, lon, polyline, afterIdx, nextIdx) {
+  if (!polyline || afterIdx === undefined || nextIdx === undefined) return null
+  if (afterIdx === nextIdx) return null
+
+  const ascending  = afterIdx < nextIdx
+  const rangeStart = Math.min(afterIdx, nextIdx)
+  const rangeEnd   = Math.max(afterIdx, nextIdx)
+
+  // Find the nearest vertex to the bus within its current segment
+  let nearestInRange = rangeStart
+  let minDist = Infinity
+  for (let i = rangeStart; i <= rangeEnd; i++) {
+    const d = Math.hypot(polyline[i][0] - lat, polyline[i][1] - lon)
+    if (d < minDist) { minDist = d; nearestInRange = i }
+  }
+
+  // Slice from nearest vertex to the next-stop vertex
+  let segment
+  if (ascending) {
+    segment = polyline.slice(nearestInRange, nextIdx + 1)
+  } else {
+    segment = [...polyline.slice(nextIdx, nearestInRange + 1)].reverse()
+  }
+
+  if (segment.length < 1) return null
+  return [[lat, lon], ...segment]  // exact bus position as the first point
+}
+
+// ─── Dead reckoning ───────────────────────────────────────────────────────────
+
+function deadReckonPosition(busData, nowMs, polyline) {
+  const elapsedSec        = (nowMs - busData.fetchedAt) / 1000
+  const currentTimeToNext = Math.max(0, busData.timeToNextStop - elapsedSec)
+  const { gapSeconds }    = busData
+  const t = gapSeconds > 0
+    ? Math.min(1, Math.max(0, 1 - currentTimeToNext / (currentTimeToNext + gapSeconds)))
+    : 1
+
+  // Prefer road-snapped interpolation when polyline indices are available
+  const snapped = interpolateAlongPolyline(
+    polyline,
+    busData.afterStopPolylineIdx,
+    busData.nextStopPolylineIdx,
+    t,
+  )
+  if (snapped) {
+    return { ...snapped, minutesToNextStop: Math.round(currentTimeToNext / 60) }
+  }
+
+  // Fallback: straight-line between stop coordinates
+  const { nextStop, afterStop } = busData
+  return {
+    lat: afterStop.lat + (nextStop.lat - afterStop.lat) * t,
+    lon: afterStop.lon + (nextStop.lon - afterStop.lon) * t,
+    minutesToNextStop: Math.round(currentTimeToNext / 60),
+  }
+}
+
+// ─── Colour helpers ───────────────────────────────────────────────────────────
+
+const isNightRoute = routeId => routeId.startsWith('N')
+
+function getBusColor(routeId, direction, isAllMode) {
+  // Night routes always use their route colour — direction coding doesn't apply
+  if (isAllMode || isNightRoute(routeId)) return ROUTE_COLORS[routeId] || '#888'
+  return direction === 'inbound' ? INBOUND_COLOR : OUTBOUND_COLOR
+}
+
+function getRouteLineColor(routeId, isAllMode, viewMode) {
+  if (viewMode === 'static') return ROUTE_COLORS[routeId] || '#888'
+  // Night routes always use their lighter route colour even in single-route live view
+  if (isAllMode || isNightRoute(routeId)) return ROUTE_LINE_COLORS[routeId] || '#aaa'
+  return '#1a1a1a'
+}
+
+// Fires onClickEmpty when the user clicks the map canvas rather than a layer.
+// Route polylines and bus markers set bubblingMouseEvents={false} so their clicks
+// don't reach this handler.
+function MapClickHandler({ onClickEmpty }) {
+  useMapEvents({ click: onClickEmpty })
+  return null
+}
+
+// ─── Headway / frequency helpers ─────────────────────────────────────────────
+
+// Compute median headway in minutes from a raw TfL arrivals array.
+// Groups predictions by stop, finds gaps between consecutive bus times,
+// then takes the median to avoid outliers from buses far in the future.
+function calculateHeadwayMinutes(allArrivals) {
+  if (!allArrivals || allArrivals.length === 0) return null
+
+  const byStop = {}
+  allArrivals.forEach(a => {
+    const stopId = a.naptanId || a.stationId
+    if (!stopId) return
+    if (!byStop[stopId]) byStop[stopId] = []
+    byStop[stopId].push(a.timeToStation)
+  })
+
+  const gaps = []
+  Object.values(byStop).forEach(times => {
+    if (times.length < 2) return
+    const sorted = [...times].sort((a, b) => a - b)
+    for (let i = 1; i < sorted.length; i++) {
+      const gapSec = sorted[i] - sorted[i - 1]
+      if (gapSec > 30 && gapSec < 3600) gaps.push(gapSec)
+    }
+  })
+
+  if (gaps.length === 0) return null
+  gaps.sort((a, b) => a - b)
+  return gaps[Math.floor(gaps.length / 2)] / 60 // median gap in minutes
+}
+
+function getHeadwayColor(headwayMinutes) {
+  if (headwayMinutes === null || headwayMinutes === undefined) return null
+  if (headwayMinutes < 5)  return '#2d9e5f'
+  if (headwayMinutes < 10) return '#f0b429'
+  if (headwayMinutes < 20) return '#e67300'
+  return '#cc2936'
+}
+
+// ─── Bunching detection ───────────────────────────────────────────────────────
+// Buses on the same route+direction within ~400 m of each other are "bunching".
+// The rear bus (lower polyline progress) is flagged; the front bus is left normal.
+
+const BUNCHING_THRESHOLD_DEG = 0.0045 // ≈ 450 m at London's latitude
+
+function detectBunching(buses) {
+  const bunchedIds = new Set()
+  const pairs = [] // [{ rear, front }]
+
+  // Group by route + direction so we don't cross-compare different services
+  const groups = {}
+  buses.forEach(bus => {
+    const key = `${bus.routeId}::${bus.direction || 'any'}`
+    if (!groups[key]) groups[key] = []
+    groups[key].push(bus)
+  })
+
+  Object.values(groups).forEach(group => {
+    if (group.length < 2) return
+    for (let i = 0; i < group.length; i++) {
+      for (let j = i + 1; j < group.length; j++) {
+        const a = group[i]
+        const b = group[j]
+        if (Math.hypot(a.lat - b.lat, a.lon - b.lon) > BUNCHING_THRESHOLD_DEG) continue
+
+        // Determine which is "rear": lower polyline index for outbound = behind,
+        // higher polyline index for inbound = behind.
+        const aIdx = a.afterStopPolylineIdx ?? 0
+        const bIdx = b.afterStopPolylineIdx ?? 0
+        const aIsOutbound = a.direction !== 'inbound'
+        const rear  = aIsOutbound ? (aIdx <= bIdx ? a : b) : (aIdx >= bIdx ? a : b)
+        const front = rear === a ? b : a
+
+        if (!bunchedIds.has(rear.vehicleId)) {
+          bunchedIds.add(rear.vehicleId)
+          pairs.push({ rear, front })
+        }
+      }
+    }
+  })
+
+  return { bunchedIds, pairs }
+}
+
+// ─── Bus dot + trail ──────────────────────────────────────────────────────────
+
+// Two overlapping polylines with offset pulse animations create a travelling-wave
+// effect along the road-snapped segment from the bus to its next stop.
+function ReachingLine({ positions, isBunched, color }) {
+  if (!positions || positions.length < 2) return null
+  const lineColor = isBunched ? '#e63946' : color
+  const weight    = isBunched ? 3 : 2
+  return (
+    <>
+      <Polyline positions={positions}
+        pathOptions={{ color: lineColor, weight, lineCap: 'round', lineJoin: 'round',
+          className: isBunched ? 'reach-a-bunched' : 'reach-a' }} />
+      <Polyline positions={positions}
+        pathOptions={{ color: lineColor, weight, lineCap: 'round', lineJoin: 'round',
+          className: isBunched ? 'reach-b-bunched' : 'reach-b' }} />
+    </>
+  )
+}
+
+// Semi-transparent pulsing band connecting a bunched rear bus to the bus in front.
+// Visually marks the "too-close" zone between them.
+function BunchingBand({ rear, front }) {
+  return (
+    <Polyline
+      positions={[[rear.lat, rear.lon], [front.lat, front.lon]]}
+      pathOptions={{
+        color: '#e63946',
+        weight: 14,
+        lineCap: 'round',
+        className: 'bunching-band',
+      }}
+    />
+  )
+}
+
+function BusDot({ vehicleId, lat, lon, trail, direction, destination, nextStopName,
+                  minutesToNextStop, routeId, isAllMode, isBunched, reachingPolyline }) {
+  const dotColor   = getBusColor(routeId, direction, isAllMode)
+  const trailColor = isBunched ? '#e63946' : dotColor
+  const fillColor  = isBunched ? '#e63946' : dotColor
+
+  return (
+    <>
+      <ReachingLine positions={reachingPolyline} isBunched={isBunched} color={dotColor} />
+      {trail.length >= 2 && (
+        <Polyline
+          positions={trail}
+          pathOptions={{ color: trailColor, opacity: 1, weight: 5, lineCap: 'round', lineJoin: 'round' }}
+        />
+      )}
+      {/* Pulsing glow ring behind bunched bus dot */}
+      {isBunched && (
+        <CircleMarker
+          center={[lat, lon]}
+          radius={16}
+          bubblingMouseEvents={false}
+          pathOptions={{ color: '#e63946', fillColor: '#e63946', fillOpacity: 0.18, weight: 0 }}
+        />
+      )}
+      <CircleMarker
+        center={[lat, lon]}
+        radius={9}
+        bubblingMouseEvents={false}
+        pathOptions={{ color: '#fff', fillColor: fillColor, fillOpacity: 1, weight: 2.5 }}
+      >
+        <Popup>
+          <div style={styles.popup}>
+            <div style={styles.popupRoute}>Route {routeId}</div>
+            {isBunched && <div style={styles.popupBunching}>⚠ Bunching detected</div>}
+            <div style={styles.popupDestination}>→ {destination}</div>
+            <div style={styles.popupDetail}>
+              <span style={styles.popupLabel}>Next stop</span>
+              <span>{nextStopName}</span>
+            </div>
+            <div style={styles.popupDetail}>
+              <span style={styles.popupLabel}>ETA</span>
+              <span>{minutesToNextStop} min</span>
+            </div>
+            <div style={styles.popupVehicle}>Vehicle {vehicleId}</div>
+          </div>
+        </Popup>
+      </CircleMarker>
+    </>
+  )
+}
+
+// ─── Animated bus blind text ──────────────────────────────────────────────────
+// Replicates the mechanical roll of a destination blind when route changes.
+// Old text exits upward, new text enters from below — both during 400 ms.
+
+function AnimatedBlindText({ text, textStyle, height = 28 }) {
+  const [curr, setCurr]   = useState(text)
+  const [prev, setPrev]   = useState(null)
+  const [animId, setAnimId] = useState(0)
+
+  useEffect(() => {
+    if (text === curr) return
+    setPrev(curr)
+    setCurr(text)
+    setAnimId(id => id + 1)
+    const timer = setTimeout(() => setPrev(null), 500)
+    return () => clearTimeout(timer)
+  }, [text])
+
+  return (
+    <div style={{ overflow: 'hidden', position: 'relative', height }}>
+      {prev !== null && (
+        <div
+          key={`out-${animId}`}
+          style={{
+            ...textStyle,
+            position: 'absolute',
+            top: 0, left: 0,
+            animation: 'blindOut 0.4s cubic-bezier(0.4, 0, 0.2, 1) forwards',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {prev}
+        </div>
+      )}
+      <div
+        key={`in-${animId}`}
+        style={{
+          ...textStyle,
+          animation: animId > 0 ? 'blindIn 0.4s cubic-bezier(0.4, 0, 0.2, 1) forwards' : 'none',
+          opacity: animId > 0 ? 0 : 1,
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {curr}
+      </div>
+    </div>
+  )
+}
+
+// ─── Custom route dropdown ────────────────────────────────────────────────────
+
+function RouteDropdown({ selectedRoute, onRouteChange, availableRoutes }) {
+  const [isOpen, setIsOpen]       = useState(false)
+  const [hoveredRoute, setHovered] = useState(null)
+  const containerRef = useRef(null)
+
+  useEffect(() => {
+    function handleOutsideClick(e) {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        setIsOpen(false)
+      }
+    }
+    if (isOpen) document.addEventListener('mousedown', handleOutsideClick)
+    return () => document.removeEventListener('mousedown', handleOutsideClick)
+  }, [isOpen])
+
+  return (
+    <div ref={containerRef} style={{ position: 'relative' }}>
+      <div
+        role="button"
+        aria-expanded={isOpen}
+        onClick={() => setIsOpen(v => !v)}
+        style={styles.blindRouteSection}
+      >
+        <AnimatedBlindText
+          text={selectedRoute === 'all' ? 'All' : selectedRoute}
+          textStyle={styles.blindRouteText}
+          height={28}
+        />
+        <span style={{
+          ...styles.blindArrow,
+          display: 'inline-block',
+          transition: 'transform 0.2s',
+          transform: isOpen ? 'rotate(180deg)' : 'none',
+        }}>↓</span>
+      </div>
+
+      {isOpen && (
+        <div style={styles.dropdownPanel}>
+          <div
+            onMouseEnter={() => setHovered('all')}
+            onMouseLeave={() => setHovered(null)}
+            onClick={() => { onRouteChange('all'); setIsOpen(false) }}
+            style={{ ...styles.dropdownOption, background: hoveredRoute === 'all' || selectedRoute === 'all' ? '#2a2a2a' : 'transparent' }}
+          >
+            <span style={styles.dropdownOptionLabel}>All routes</span>
+            {selectedRoute === 'all' && <span style={styles.dropdownCheck}>✓</span>}
+          </div>
+          <div style={styles.dropdownDivider} />
+          {availableRoutes.map(route => (
+            <div
+              key={route}
+              onMouseEnter={() => setHovered(route)}
+              onMouseLeave={() => setHovered(null)}
+              onClick={() => { onRouteChange(route); setIsOpen(false) }}
+              style={{ ...styles.dropdownOption, background: hoveredRoute === route || selectedRoute === route ? '#2a2a2a' : 'transparent' }}
+            >
+              <span style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: ROUTE_COLORS[route], display: 'inline-block' }} />
+              <span style={styles.dropdownRouteNumber}>{route}</span>
+              <span style={styles.dropdownRouteDest}>— {ROUTE_DESTINATIONS[route]}</span>
+              {selectedRoute === route && <span style={styles.dropdownCheck}>✓</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Destination blind ─────────────────────────────────────────────────────────
+
+function DestinationBlind({ selectedRoute, onRouteChange, availableRoutes, isNightMode }) {
+  return (
+    <div style={styles.blindFloatRow}>
+      <div style={{
+        ...styles.blindPill,
+        background: isNightMode ? '#0a0a1a' : '#0d0d0d',
+        boxShadow: isNightMode
+          ? '0 8px 32px rgba(168,85,247,0.25), 0 2px 8px rgba(0,0,0,0.6)'
+          : '0 8px 32px rgba(0,0,0,0.45)',
+      }}>
+        {isNightMode && (
+          <div style={styles.nightBadge}>N</div>
+        )}
+        <div style={styles.blindDestinationSection}>
+          <AnimatedBlindText
+            text={ROUTE_DESTINATIONS[selectedRoute] || selectedRoute}
+            textStyle={styles.blindDestinationText}
+            height={28}
+          />
+        </div>
+        <RouteDropdown
+          selectedRoute={selectedRoute}
+          onRouteChange={onRouteChange}
+          availableRoutes={availableRoutes}
+        />
+      </div>
+    </div>
+  )
+}
+
+// ─── Icon buttons — bottom right controls ─────────────────────────────────────
+
+// ─── Heatmap legend ───────────────────────────────────────────────────────────
+
+const HEADWAY_SCALE = [
+  { color: '#2d9e5f', label: '< 5 min',   desc: 'High frequency' },
+  { color: '#f0b429', label: '5–10 min',  desc: '' },
+  { color: '#e67300', label: '10–20 min', desc: '' },
+  { color: '#cc2936', label: '> 20 min',  desc: 'Low frequency' },
+]
+
+function HeatmapLegend({ routeHeadways, loadedRouteIds }) {
+  const hasNoData = loadedRouteIds.some(
+    id => routeHeadways[id] === null || routeHeadways[id] === undefined
+  )
+
+  return (
+    <div style={styles.legend}>
+      <div style={styles.legendTitle}>Frequency (headway)</div>
+      {HEADWAY_SCALE.map(({ color, label }) => (
+        <div key={label} style={styles.legendRow}>
+          <div style={{ width: 24, height: 4, borderRadius: 2, background: color, flexShrink: 0 }} />
+          <span style={styles.legendText}>{label}</span>
+        </div>
+      ))}
+      {hasNoData && (
+        <>
+          <div style={styles.legendRow}>
+            <div style={{ width: 24, height: 4, borderRadius: 2, background: '#aaa', opacity: 0.5, flexShrink: 0 }} />
+            <span style={styles.legendText}>No data</span>
+          </div>
+          <div style={styles.heatmapNoDataNote}>
+            No live frequency data available
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+// ─── Digital clock ────────────────────────────────────────────────────────────
+
+function DigitalClock({ isNightMode }) {
+  const [now, setNow] = useState(new Date())
+
+  useEffect(() => {
+    const interval = setInterval(() => setNow(new Date()), 1000)
+    return () => clearInterval(interval)
+  }, [])
+
+  const fmt = opts => now.toLocaleTimeString('en-GB', { timeZone: 'Europe/London', hour12: false, ...opts })
+  const hhmm   = fmt({ hour: '2-digit', minute: '2-digit' })
+  const secs   = fmt({ second: '2-digit' }).slice(-2)
+
+  return (
+    <div style={{ ...styles.clock, ...(isNightMode ? styles.clockNight : {}) }}>
+      <div style={styles.clockTimeRow}>
+        <span style={styles.clockHHMM}>{hhmm}</span>
+        <span style={styles.clockSS}>{secs}</span>
+      </div>
+      <div style={styles.clockDivider} />
+      <div style={styles.clockLabel}>
+        {isNightMode ? '🌙 Night service' : '☀ Day service'}
+      </div>
+      <div style={styles.clockHours}>
+        {isNightMode ? NIGHT_SERVICE_HOURS : DAY_SERVICE_HOURS}
+      </div>
+    </div>
+  )
+}
+
+// ─── Bunching legend ──────────────────────────────────────────────────────────
+
+function Legend() {
+  return (
+    <div style={styles.legend}>
+      <div style={styles.legendTitle}>Bunching</div>
+      <div style={styles.legendRow}>
+        <span style={styles.legendDotRed} />
+        <span style={styles.legendText}>Bus caught in bunch</span>
+      </div>
+      <div style={styles.legendRow}>
+        <div style={styles.legendPulseLine} />
+        <span style={styles.legendText}>Reaching next stop</span>
+      </div>
+      <div style={styles.legendRow}>
+        <div style={styles.legendBand} />
+        <span style={styles.legendText}>Gap zone</span>
+      </div>
+    </div>
+  )
+}
+
+// ─── Icon buttons ─────────────────────────────────────────────────────────────
+
+function IconButton({ active, onClick, title, children }) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      style={{
+        width: 44, height: 44,
+        borderRadius: '50%',
+        border: 'none',
+        cursor: 'pointer',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: active ? '#0d0d0d' : '#efefef',
+        color: active ? '#ffffff' : '#666',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.18)',
+        transition: 'background 0.15s, color 0.15s',
+        flexShrink: 0,
+      }}
+    >
+      {children}
+    </button>
+  )
+}
+
+// Globe — map tiles
+function GlobeIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+      <circle cx="12" cy="12" r="10"/>
+      <line x1="2" y1="12" x2="22" y2="12"/>
+      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+    </svg>
+  )
+}
+
+// Pin cluster — bus stops
+function StopsIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+      <path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 1 1 16 0z"/>
+      <circle cx="12" cy="10" r="3"/>
+    </svg>
+  )
+}
+
+// Curved path — route line
+function RouteIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+      <circle cx="5" cy="18" r="2" fill="currentColor" stroke="none"/>
+      <circle cx="19" cy="6" r="2" fill="currentColor" stroke="none"/>
+      <path d="M5 16V13a7 7 0 0 1 7-7h5"/>
+    </svg>
+  )
+}
+
+// Signal rings — live view
+function LiveIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+      <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/>
+      <path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7"/>
+      <path d="M5.5 5.5a9 9 0 0 0 0 13M18.5 5.5a9 9 0 0 1 0 13"/>
+    </svg>
+  )
+}
+
+// Bar chart — static/data view
+function StaticIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+      <rect x="3"  y="12" width="4" height="9" rx="1"/>
+      <rect x="10" y="7"  width="4" height="14" rx="1"/>
+      <rect x="17" y="3"  width="4" height="18" rx="1"/>
+    </svg>
+  )
+}
+
+// Frequency heatmap — three horizontal bars in green/yellow/red
+function HeatmapIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24">
+      <rect x="2" y="3"  width="20" height="5" rx="1.5" fill="#2d9e5f"/>
+      <rect x="2" y="10" width="20" height="5" rx="1.5" fill="#f0b429"/>
+      <rect x="2" y="17" width="20" height="5" rx="1.5" fill="#cc2936"/>
+    </svg>
+  )
+}
+
+// Moon — switch to night mode
+function MoonIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+    </svg>
+  )
+}
+
+// Sun — switch to day mode
+function SunIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+      <circle cx="12" cy="12" r="5"/>
+      <line x1="12" y1="1"  x2="12" y2="3"/>
+      <line x1="12" y1="21" x2="12" y2="23"/>
+      <line x1="4.22" y1="4.22"  x2="5.64" y2="5.64"/>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+      <line x1="1" y1="12" x2="3" y2="12"/>
+      <line x1="21" y1="12" x2="23" y2="12"/>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+    </svg>
+  )
+}
+
+function ControlsPanel({ mapVisible, onToggleMap, stopsVisible, onToggleStops,
+                          routeLineVisible, onToggleRouteLine, isNightMode, onToggleNight,
+                          viewMode, onToggleViewMode, heatmapVisible, onToggleHeatmap }) {
+  return (
+    <div style={styles.controlsPanel}>
+      <IconButton
+        active={viewMode === 'live'}
+        onClick={onToggleViewMode}
+        title={viewMode === 'live' ? 'Switch to static view' : 'Switch to live view'}
+      >
+        {viewMode === 'live' ? <LiveIcon /> : <StaticIcon />}
+      </IconButton>
+      <IconButton active={heatmapVisible} onClick={onToggleHeatmap} title="Frequency heatmap">
+        <HeatmapIcon />
+      </IconButton>
+      <IconButton active={mapVisible}       onClick={onToggleMap}       title="Map tiles"><GlobeIcon /></IconButton>
+      <IconButton active={stopsVisible}     onClick={onToggleStops}     title="Bus stops"><StopsIcon /></IconButton>
+      <IconButton active={routeLineVisible} onClick={onToggleRouteLine} title="Route line"><RouteIcon /></IconButton>
+      <IconButton active={isNightMode}      onClick={onToggleNight}
+        title={isNightMode ? 'Switch to day' : 'Switch to night'}>
+        {isNightMode ? <SunIcon /> : <MoonIcon />}
+      </IconButton>
+    </div>
+  )
+}
+
+// ─── Debug timestamp ───────────────────────────────────────────────────────────
+
+function DebugTimestamp({ lastUpdated }) {
+  if (!lastUpdated) return null
+  const timeString = lastUpdated.toLocaleTimeString('en-GB', {
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  })
+  return <div style={styles.timestampPill}>{timeString}</div>
+}
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
+
+export default function App() {
+  const [isNightMode,      setIsNightMode]      = useState(false)
+  const [viewMode,         setViewMode]         = useState('live') // 'live' | 'static'
+  const [heatmapVisible,   setHeatmapVisible]   = useState(false)
+  const [selectedRoute,    setSelectedRoute]    = useState(DEFAULT_ROUTE)
+  const [mapVisible,       setMapVisible]       = useState(true)
+  const [stopsVisible,     setStopsVisible]     = useState(true)
+  const [routeLineVisible, setRouteLineVisible] = useState(true)
+  const [routeStops,       setRouteStops]       = useState({})
+  const [routePolylines,   setRoutePolylines]   = useState({})
+  const [routeHeadways,    setRouteHeadways]    = useState({}) // { routeId: minutes | null }
+  const [animatedBuses,    setAnimatedBuses]    = useState([])
+  const [lastUpdated,      setLastUpdated]      = useState(null)
+
+  const rawBusDataRef      = useRef({})
+  const trailsRef          = useRef({})
+  const routePolylinesRef  = useRef({})
+  const arrivalsTimerRef   = useRef(null)
+
+  const currentRoutes = isNightMode ? SUPPORTED_NIGHT_ROUTES : SUPPORTED_DAY_ROUTES
+  const isAllMode     = selectedRoute === 'all'
+  const isStaticView  = viewMode === 'static'
+  const tileUrl       = isNightMode ? NIGHT_TILE_URL : DAY_TILE_URL
+  const mapBg         = isNightMode ? '#0d1117' : '#ffffff'
+
+  // When the mode flips, always go back to all routes
+  useEffect(() => {
+    setSelectedRoute(DEFAULT_ROUTE)
+  }, [isNightMode])
+
+  // ── Dead reckoning tick — runs every second ───────────────────────────────
+  useEffect(() => {
+    function tick() {
+      const now = Date.now()
+      const updated = []
+
+      Object.entries(rawBusDataRef.current).forEach(([vehicleId, busData]) => {
+        const polyline = routePolylinesRef.current[busData.routeId]
+        const { lat, lon, minutesToNextStop } = deadReckonPosition(busData, now, polyline)
+
+        if (!trailsRef.current[vehicleId]) trailsRef.current[vehicleId] = []
+        const trail = trailsRef.current[vehicleId]
+        trail.push([lat, lon])
+        if (trail.length > TRAIL_LENGTH_SECONDS) trail.shift()
+
+        const reachingPolyline = extractReachingPolyline(
+          lat, lon, polyline,
+          busData.afterStopPolylineIdx,
+          busData.nextStopPolylineIdx,
+        )
+
+        updated.push({
+          vehicleId, lat, lon,
+          trail: [...trail],
+          direction:            busData.direction,
+          destination:          busData.destination,
+          nextStopName:         busData.nextStopName,
+          minutesToNextStop,
+          routeId:              busData.routeId,
+          afterStopPolylineIdx: busData.afterStopPolylineIdx,
+          reachingPolyline,
+        })
+      })
+
+      setAnimatedBuses(updated)
+    }
+
+    tick()
+    const interval = setInterval(tick, DEAD_RECKONING_TICK_MS)
+    return () => clearInterval(interval)
+  }, [])
+
+  // ── Load arrivals and store timing + polyline-snap indices in rawBusDataRef ─
+  const loadArrivals = useCallback(async (routeId, outStops, inStops) => {
+    try {
+      const allArrivals = await fetchArrivals(routeId)
+
+      const outLookup = buildStopLookup(outStops)
+      const inLookup  = buildStopLookup(inStops)
+      const combined  = { ...outLookup, ...inLookup }
+
+      const allBusData = [
+        ...interpolateBusData(allArrivals.filter(a => a.direction === 'outbound'), Object.keys(outLookup).length ? outLookup : combined),
+        ...interpolateBusData(allArrivals.filter(a => a.direction === 'inbound'),  Object.keys(inLookup).length  ? inLookup  : combined),
+        ...interpolateBusData(allArrivals.filter(a => !a.direction), combined),
+      ]
+
+      // Snap each bus's surrounding stops onto the OSRM polyline using direct
+      // lat/lon nearest-vertex lookup — more robust than ID matching.
+      const polyline = routePolylinesRef.current[routeId]
+
+      const seen = new Set()
+      const now  = Date.now()
+      allBusData.forEach(bus => {
+        if (seen.has(bus.vehicleId)) return
+        seen.add(bus.vehicleId)
+        rawBusDataRef.current[bus.vehicleId] = {
+          ...bus,
+          fetchedAt: now,
+          routeId,
+          nextStopPolylineIdx:  polyline ? findNearestPolylineIdx(bus.nextStop.lat,  bus.nextStop.lon,  polyline) : undefined,
+          afterStopPolylineIdx: polyline ? findNearestPolylineIdx(bus.afterStop.lat, bus.afterStop.lon, polyline) : undefined,
+        }
+      })
+
+      // Compute headway from all arrivals and store for the frequency heatmap
+      const headwayMinutes = calculateHeadwayMinutes(allArrivals)
+      setRouteHeadways(prev => ({ ...prev, [routeId]: headwayMinutes }))
+
+      setLastUpdated(new Date())
+    } catch (err) {
+      console.error(`Arrivals fetch failed for route ${routeId}:`, err)
+    }
+  }, [])
+
+  // ── Route change: clear state, load OSRM first, then arrivals ────────────
+  useEffect(() => {
+    rawBusDataRef.current     = {}
+    trailsRef.current         = {}
+    routePolylinesRef.current = {}
+    setAnimatedBuses([])
+    setRouteHeadways({})
+    setRouteStops({})
+    setRoutePolylines({})
+    if (arrivalsTimerRef.current) clearInterval(arrivalsTimerRef.current)
+
+    const routes = selectedRoute === 'all' ? currentRoutes : [selectedRoute]
+
+    async function initialize() {
+      // 1. Fetch stop sequences for all active routes in parallel
+      const geometries = await Promise.all(routes.map(async routeId => {
+        const [outStops, inStops] = await Promise.all([
+          fetchStopSequence(routeId, 'outbound'),
+          fetchStopSequence(routeId, 'inbound'),
+        ])
+        return { routeId, outStops, inStops }
+      }))
+
+      const newRouteStops = {}
+      geometries.forEach(({ routeId, outStops, inStops }) => {
+        newRouteStops[routeId] = { outboundStops: outStops, inboundStops: inStops }
+      })
+      setRouteStops(newRouteStops)
+
+      // 2. Fetch OSRM route lines (outbound geometry, one per route) in parallel
+      //    Do this BEFORE arrivals so dead reckoning can snap to road from first tick.
+      const osrmResults = await Promise.all(
+        geometries.map(async ({ routeId, outStops }) => ({
+          routeId,
+          polyline: await fetchOsrmRoute(outStops),
+        }))
+      )
+
+      const newPolylines = {}
+      osrmResults.forEach(({ routeId, polyline }) => {
+        if (polyline) {
+          newPolylines[routeId] = polyline
+          routePolylinesRef.current[routeId] = polyline // available to dead reckoning tick
+        }
+      })
+      setRoutePolylines(newPolylines)
+
+      // 3. Fetch arrivals — polyline is now in ref so stop→index mapping works
+      // 4. Live-only: fetch arrivals and start refresh interval
+      if (viewMode === 'live') {
+        await Promise.all(
+          geometries.map(({ routeId, outStops, inStops }) =>
+            loadArrivals(routeId, outStops, inStops)
+          )
+        )
+        const activeIds = new Set(Object.keys(rawBusDataRef.current))
+        Object.keys(trailsRef.current).forEach(id => {
+          if (!activeIds.has(id)) delete trailsRef.current[id]
+        })
+
+        arrivalsTimerRef.current = setInterval(async () => {
+          await Promise.all(
+            geometries.map(({ routeId, outStops, inStops }) =>
+              loadArrivals(routeId, outStops, inStops)
+            )
+          )
+          const currentIds = new Set(Object.keys(rawBusDataRef.current))
+          Object.keys(trailsRef.current).forEach(id => {
+            if (!currentIds.has(id)) delete trailsRef.current[id]
+          })
+        }, ARRIVALS_REFRESH_INTERVAL_MS)
+      }
+    }
+
+    initialize()
+
+    return () => {
+      if (arrivalsTimerRef.current) clearInterval(arrivalsTimerRef.current)
+    }
+  }, [selectedRoute, isNightMode, viewMode, loadArrivals])
+
+  const allOutboundStops  = Object.values(routeStops).flatMap(d => d.outboundStops)
+  const allInboundStops   = Object.values(routeStops).flatMap(d => d.inboundStops)
+  const loadedRouteIds    = Object.keys(routePolylines)
+  const { bunchedIds, pairs: bunchingPairs } = detectBunching(animatedBuses)
+
+  // When heatmap is toggled on while in static view, switch to live so we have arrivals data
+  const handleToggleHeatmap = () => {
+    if (!heatmapVisible && isStaticView) setViewMode('live')
+    setHeatmapVisible(v => !v)
+  }
+
+  return (
+    <div style={styles.appWrapper}>
+      <div style={styles.mapWrapper}>
+        <DestinationBlind
+          selectedRoute={selectedRoute}
+          onRouteChange={setSelectedRoute}
+          availableRoutes={currentRoutes}
+          isNightMode={isNightMode}
+        />
+
+        <DigitalClock isNightMode={isNightMode} />
+
+        <MapContainer
+          center={LONDON_CENTER}
+          zoom={DEFAULT_ZOOM}
+          style={{ width: '100%', height: '100%', background: mapBg }}
+          zoomControl={false}
+          attributionControl={false}
+          scrollWheelZoom={true}
+          wheelDebounceTime={40}
+          wheelPxPerZoomLevel={120}
+        >
+          {mapVisible && (
+            <TileLayer url={tileUrl} attribution={TILE_ATTRIBUTION} opacity={isNightMode ? 0.85 : 0.45} />
+          )}
+
+          {/* Clicking empty map canvas resets to all-routes */}
+          <MapClickHandler onClickEmpty={() => setSelectedRoute('all')} />
+
+          {/* Route polylines — heatmap colours when active, normal colours otherwise */}
+          {(heatmapVisible || isStaticView || routeLineVisible) && Object.entries(routePolylines).map(([routeId, positions]) => {
+            let lineColor, lineOpacity, lineWeight
+            if (heatmapVisible) {
+              const headwayColor = getHeadwayColor(routeHeadways[routeId])
+              lineColor   = headwayColor ?? '#aaaaaa'
+              lineOpacity = headwayColor ? 1 : 0.3
+              lineWeight  = 5
+            } else {
+              lineColor   = getRouteLineColor(routeId, isAllMode, viewMode)
+              lineOpacity = 1
+              lineWeight  = isStaticView ? 4 : 2
+            }
+            return (
+              <React.Fragment key={routeId}>
+                <Polyline positions={positions}
+                  pathOptions={{ color: lineColor, opacity: lineOpacity, weight: lineWeight, lineCap: 'round' }} />
+                <Polyline positions={positions}
+                  bubblingMouseEvents={false}
+                  eventHandlers={{ click: () => setSelectedRoute(routeId) }}
+                  pathOptions={{ opacity: 0.001, weight: 16, color: '#000' }} />
+              </React.Fragment>
+            )
+          })}
+
+          {stopsVisible && allOutboundStops.map(stop => (
+            <CircleMarker key={`out-${stop.id}`} center={[stop.lat, stop.lon]} radius={2.5}
+              bubblingMouseEvents={false}
+              pathOptions={{ color: isNightMode ? '#555' : '#bbb', fillColor: isNightMode ? '#555' : '#bbb', fillOpacity: 1, weight: 0 }} />
+          ))}
+          {stopsVisible && allInboundStops.map(stop => (
+            <CircleMarker key={`in-${stop.id}`} center={[stop.lat, stop.lon]} radius={2.5}
+              bubblingMouseEvents={false}
+              pathOptions={{ color: isNightMode ? '#555' : '#bbb', fillColor: isNightMode ? '#555' : '#bbb', fillOpacity: 1, weight: 0 }} />
+          ))}
+
+          {/* Live-only (and heatmap off): bus dots, trails, bunching */}
+          {!isStaticView && !heatmapVisible && bunchingPairs.map(({ rear, front }) => (
+            <BunchingBand key={`bunch-${rear.vehicleId}`} rear={rear} front={front} />
+          ))}
+          {!isStaticView && !heatmapVisible && animatedBuses.map(bus => (
+            <BusDot
+              key={bus.vehicleId}
+              {...bus}
+              isAllMode={isAllMode}
+              isBunched={bunchedIds.has(bus.vehicleId)}
+            />
+          ))}
+        </MapContainer>
+
+        {!isStaticView && !heatmapVisible && <Legend />}
+        {heatmapVisible && (
+          <HeatmapLegend routeHeadways={routeHeadways} loadedRouteIds={loadedRouteIds} />
+        )}
+
+        <ControlsPanel
+          mapVisible={mapVisible}            onToggleMap={() => setMapVisible(v => !v)}
+          stopsVisible={stopsVisible}        onToggleStops={() => setStopsVisible(v => !v)}
+          routeLineVisible={routeLineVisible} onToggleRouteLine={() => setRouteLineVisible(v => !v)}
+          isNightMode={isNightMode}          onToggleNight={() => setIsNightMode(v => !v)}
+          viewMode={viewMode}               onToggleViewMode={() => setViewMode(v => v === 'live' ? 'static' : 'live')}
+          heatmapVisible={heatmapVisible}   onToggleHeatmap={handleToggleHeatmap}
+        />
+
+        <DebugTimestamp lastUpdated={lastUpdated} />
+      </div>
+    </div>
+  )
+}
+
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
+const styles = {
+  appWrapper: {
+    display: 'flex', flexDirection: 'column',
+    height: '100vh', width: '100vw', overflow: 'hidden',
+  },
+
+  mapWrapper: { flex: 1, position: 'relative' },
+
+  // ── Digital clock ──────────────────────────────────────────────────────────
+
+  clock: {
+    position: 'absolute', top: 20, right: 20, zIndex: 1000,
+    background: 'rgba(13,13,13,0.88)',
+    borderRadius: 16, padding: '14px 20px',
+    boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
+    pointerEvents: 'none',
+    backdropFilter: 'blur(12px)',
+    WebkitBackdropFilter: 'blur(12px)',
+    textAlign: 'right',
+    minWidth: 160,
+  },
+  clockNight: {
+    background: 'rgba(10,10,26,0.92)',
+    boxShadow: '0 4px 24px rgba(168,85,247,0.2), 0 2px 8px rgba(0,0,0,0.6)',
+  },
+  clockTimeRow: {
+    display: 'flex', alignItems: 'baseline', justifyContent: 'flex-end', gap: 3,
+  },
+  clockHHMM: {
+    fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
+    fontSize: 52, fontWeight: 700, letterSpacing: '-2px', lineHeight: 1,
+    color: '#ffffff',
+  },
+  clockSS: {
+    fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
+    fontSize: 22, fontWeight: 400, letterSpacing: '-1px', lineHeight: 1,
+    color: 'rgba(255,255,255,0.45)',
+  },
+  clockDivider: {
+    height: 1, background: 'rgba(255,255,255,0.1)', margin: '10px 0 8px',
+  },
+  clockLabel: {
+    fontSize: 11, fontWeight: 600, letterSpacing: '0.08em',
+    textTransform: 'uppercase', color: 'rgba(255,255,255,0.4)',
+    fontFamily: 'Inter, system-ui, sans-serif', marginBottom: 4,
+  },
+  clockHours: {
+    fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
+    fontSize: 16, fontWeight: 500, letterSpacing: '0.02em',
+    color: 'rgba(255,255,255,0.75)',
+  },
+
+  // ── Night badge ────────────────────────────────────────────────────────────
+
+  nightBadge: {
+    background: '#a855f7',
+    color: '#fff',
+    fontSize: 12, fontWeight: 700,
+    fontFamily: 'Inter, system-ui, sans-serif',
+    borderRadius: 8, padding: '2px 8px',
+    letterSpacing: '0.06em',
+    flexShrink: 0,
+  },
+
+  // ── Destination blind ──────────────────────────────────────────────────────
+
+  blindFloatRow: {
+    position: 'absolute', top: 20, left: '50%', transform: 'translateX(-50%)',
+    zIndex: 1000, display: 'flex', alignItems: 'center', gap: 8,
+    pointerEvents: 'none',
+  },
+
+  blindPill: {
+    background: '#0d0d0d', borderRadius: 18, padding: 6,
+    display: 'flex', alignItems: 'center', gap: 4,
+    boxShadow: '0 8px 32px rgba(0,0,0,0.45)', pointerEvents: 'auto',
+  },
+
+  blindDestinationSection: {
+    background: '#1e1e1e', borderRadius: 12, padding: '11px 22px',
+    display: 'flex', alignItems: 'center',
+  },
+  blindDestinationText: {
+    color: '#ffffff', fontSize: 22, fontWeight: 700,
+    letterSpacing: '-0.4px', lineHeight: '28px',
+    fontFamily: 'Inter, system-ui, sans-serif',
+  },
+
+  blindRouteSection: {
+    background: '#1e1e1e', borderRadius: 12, padding: '11px 18px',
+    display: 'flex', alignItems: 'center', gap: 10,
+    cursor: 'pointer', userSelect: 'none',
+  },
+  blindRouteText: {
+    color: '#ffffff', fontSize: 22, fontWeight: 700,
+    letterSpacing: '-0.4px', lineHeight: '28px',
+    fontFamily: 'Inter, system-ui, sans-serif',
+  },
+  blindArrow: {
+    color: '#ffffff', fontSize: 15, lineHeight: 1, opacity: 0.8,
+  },
+
+  // ── Dropdown ───────────────────────────────────────────────────────────────
+
+  dropdownPanel: {
+    position: 'absolute', top: 'calc(100% + 8px)', right: 0,
+    background: '#0d0d0d', borderRadius: 16, padding: 6,
+    minWidth: 260, boxShadow: '0 8px 40px rgba(0,0,0,0.6)', zIndex: 2000,
+  },
+  dropdownOption: {
+    display: 'flex', alignItems: 'center', gap: 8,
+    padding: '10px 14px', borderRadius: 10, cursor: 'pointer', userSelect: 'none',
+    transition: 'background 0.1s',
+  },
+  dropdownOptionLabel: {
+    color: '#fff', fontSize: 16, fontWeight: 700,
+    fontFamily: 'Inter, system-ui, sans-serif', flex: 1,
+  },
+  dropdownRouteNumber: {
+    color: '#fff', fontSize: 16, fontWeight: 700,
+    fontFamily: 'Inter, system-ui, sans-serif', minWidth: 28,
+  },
+  dropdownRouteDest: {
+    color: 'rgba(255,255,255,0.55)', fontSize: 15, fontWeight: 400,
+    fontFamily: 'Inter, system-ui, sans-serif', flex: 1,
+  },
+  dropdownCheck: {
+    color: 'rgba(255,255,255,0.8)', fontSize: 13,
+    fontFamily: 'Inter, system-ui, sans-serif', marginLeft: 'auto', flexShrink: 0,
+  },
+  dropdownDivider: {
+    height: 1, background: 'rgba(255,255,255,0.08)', margin: '4px 8px',
+  },
+
+  heatmapNoDataNote: {
+    marginTop: 8, paddingTop: 8,
+    borderTop: '1px solid rgba(255,255,255,0.08)',
+    fontSize: 11, color: 'rgba(255,255,255,0.4)',
+    fontFamily: 'Inter, system-ui, sans-serif',
+    lineHeight: 1.4,
+  },
+
+  // ── Bunching legend ────────────────────────────────────────────────────────
+
+  legend: {
+    position: 'absolute', bottom: 20, left: 20, zIndex: 1000,
+    background: '#0d0d0d', borderRadius: 12, padding: '10px 14px',
+    boxShadow: '0 4px 16px rgba(0,0,0,0.3)', pointerEvents: 'none',
+    minWidth: 152,
+  },
+  legendTitle: {
+    fontSize: 10, fontWeight: 600, letterSpacing: '0.1em',
+    textTransform: 'uppercase', color: 'rgba(255,255,255,0.35)',
+    marginBottom: 8, fontFamily: 'Inter, system-ui, sans-serif',
+  },
+  legendRow: {
+    display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6,
+  },
+  legendText: {
+    fontSize: 12, color: 'rgba(255,255,255,0.65)',
+    fontFamily: 'Inter, system-ui, sans-serif',
+  },
+  legendDotRed: {
+    width: 10, height: 10, borderRadius: '50%',
+    background: '#e63946', flexShrink: 0, display: 'inline-block',
+  },
+  legendPulseLine: {
+    width: 24, height: 3, borderRadius: 2,
+    background: 'linear-gradient(90deg, transparent, #e63946, transparent)',
+    flexShrink: 0,
+  },
+  legendBand: {
+    width: 24, height: 8, borderRadius: 3,
+    background: 'rgba(230,57,70,0.35)', flexShrink: 0,
+  },
+
+  // ── Icon controls ──────────────────────────────────────────────────────────
+
+  controlsPanel: {
+    position: 'absolute', bottom: 20, right: 20, zIndex: 1000,
+    display: 'flex', gap: 8, pointerEvents: 'auto',
+  },
+
+  // ── Debug timestamp ────────────────────────────────────────────────────────
+
+  timestampPill: {
+    position: 'absolute', bottom: 20, left: '50%', transform: 'translateX(-50%)',
+    zIndex: 1000, background: '#0d0d0d', borderRadius: 12, padding: '8px 16px',
+    color: 'rgba(255,255,255,0.45)',
+    fontFamily: 'ui-monospace, "SF Mono", "Fira Code", Menlo, monospace',
+    fontSize: 12, letterSpacing: '0.04em',
+    pointerEvents: 'none', boxShadow: '0 4px 16px rgba(0,0,0,0.3)', whiteSpace: 'nowrap',
+  },
+
+  // ── Popup ──────────────────────────────────────────────────────────────────
+
+  popup: { minWidth: 180 },
+  popupBunching: {
+    fontSize: 11, fontWeight: 600, color: '#e63946',
+    marginBottom: 6, letterSpacing: '0.03em',
+  },
+  popupRoute: {
+    fontSize: 11, fontWeight: 600, letterSpacing: '0.08em',
+    textTransform: 'uppercase', color: '#e67300', marginBottom: 4,
+  },
+  popupDestination: {
+    fontSize: 15, fontWeight: 600, color: '#f9f7f4', marginBottom: 10, lineHeight: 1.3,
+  },
+  popupDetail: {
+    display: 'flex', justifyContent: 'space-between', gap: 16,
+    marginBottom: 3, color: '#ccc', fontSize: 12,
+  },
+  popupLabel: { color: '#777' },
+  popupVehicle: {
+    marginTop: 8, paddingTop: 8, borderTop: '1px solid #333',
+    fontSize: 11, color: '#555', fontVariantNumeric: 'tabular-nums',
+  },
+}
