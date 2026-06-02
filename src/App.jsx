@@ -4,8 +4,8 @@ import 'leaflet/dist/leaflet.css'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const SUPPORTED_DAY_ROUTES   = ['11', '22', '33', '55', '88', '3', '25', '134']
-const SUPPORTED_NIGHT_ROUTES  = ['N11', 'N55']
+const SUPPORTED_DAY_ROUTES   = ['11', '22', '33', '55', '88', '3', '25', '134', '52', '149', '101', '53', '72']
+const SUPPORTED_NIGHT_ROUTES  = ['N11', 'N55', 'N29', 'N38', 'N25', 'N53', 'N207']
 const DEFAULT_ROUTE           = 'all'
 const ARRIVALS_REFRESH_INTERVAL_MS = 30_000
 const DEAD_RECKONING_TICK_MS  = 1_000
@@ -22,35 +22,48 @@ const TILE_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyrigh
 const OUTBOUND_COLOR = '#e67300'
 const INBOUND_COLOR  = '#2171b5'
 
-// Per-route colours — all-routes mode (bus dots + trails)
+// Per-route colours — all-routes mode (bus dots)
 const ROUTE_COLORS = {
-  // Original central routes
+  // Central routes
   '11': '#d62828', '22': '#2a9d8f', '33': '#c8890a', '55': '#7b5ea7', '88': '#1d7ab5',
-  // Outer routes — distinct hues, different directions
-  '3':   '#ec4899',  // south  — hot pink
-  '25':  '#10b981',  // east   — emerald
-  '134': '#6366f1',  // north  — indigo
-  // Night routes — vivid, nocturnal palette
-  'N11': '#a855f7',  // electric purple
-  'N55': '#22d3ee',  // neon cyan
+  // First outer ring
+  '3':   '#ec4899',  // south      — hot pink
+  '25':  '#10b981',  // east       — emerald
+  '134': '#6366f1',  // north      — indigo
+  // Second outer ring
+  '52':  '#f97316',  // northwest  — orange
+  '149': '#0891b2',  // northeast  — dark cyan
+  '101': '#16a34a',  // far east   — forest green
+  '53':  '#be185d',  // southeast  — deep pink
+  '72':  '#ca8a04',  // southwest  — gold
+  // Night routes
+  'N11': '#a855f7',  'N55': '#22d3ee',
+  'N29': '#fb923c',  // north      — peach orange
+  'N38': '#34d399',  // northeast  — mint
+  'N25': '#fbbf24',  // east       — amber gold
+  'N53': '#60a5fa',  // southeast  — sky blue
+  'N207':'#e879f9',  // west       — fuchsia
 }
 
-// Per-route lighter colours — OSRM route lines (subordinate to dots)
+// Per-route lighter colours — OSRM route lines
 const ROUTE_LINE_COLORS = {
   '11': '#f08a8a', '22': '#82c4bc', '33': '#f5c84a', '55': '#b39fd4', '88': '#6baed6',
-  '3':   '#f9a8d4',  // soft pink
-  '25':  '#6ee7b7',  // soft emerald
-  '134': '#a5b4fc',  // soft indigo
-  'N11': '#d8b4fe',  // soft purple
-  'N55': '#a5f3fc',  // soft cyan
+  '3':  '#f9a8d4', '25': '#6ee7b7', '134': '#a5b4fc',
+  '52': '#fed7aa', '149': '#a5f3fc', '101': '#bbf7d0', '53': '#fbcfe8', '72': '#fef08a',
+  'N11': '#d8b4fe', 'N55': '#a5f3fc',
+  'N29': '#fed7aa', 'N38': '#a7f3d0', 'N25': '#fde68a', 'N53': '#bfdbfe', 'N207': '#f5d0fe',
 }
 
 const ROUTE_DESTINATIONS = {
   'all': 'All Routes',
-  '11': 'Liverpool St', '22': 'Piccadilly',    '33': 'Hammersmith',
+  '11': 'Liverpool St',  '22': 'Piccadilly',      '33': 'Hammersmith',
   '55': 'Oxford Circus', '88': 'Clapham Common',
-  '3':  'Crystal Palace', '25': 'Ilford',      '134': 'High Barnet',
+  '3':  'Crystal Palace','25': 'Ilford',           '134': 'High Barnet',
+  '52': 'Willesden',     '149': 'Edmonton',        '101': 'Gallions Reach',
+  '53': 'Plumstead',     '72': 'Roehampton',
   'N11': 'Liverpool St', 'N55': 'Oxford Circus',
+  'N29': 'Wood Green',   'N38': 'Clapton',         'N25': 'Ilford',
+  'N53': 'Plumstead',    'N207': 'Uxbridge',
 }
 
 // London bus operating hours (approximate, for display only)
@@ -391,46 +404,13 @@ function ReachingLine({ positions, isBunched, color }) {
   )
 }
 
-// Semi-transparent pulsing band connecting a bunched rear bus to the bus in front.
-// Visually marks the "too-close" zone between them.
-function BunchingBand({ rear, front }) {
-  return (
-    <Polyline
-      positions={[[rear.lat, rear.lon], [front.lat, front.lon]]}
-      pathOptions={{
-        color: '#e63946',
-        weight: 14,
-        lineCap: 'round',
-        className: 'bunching-band',
-      }}
-    />
-  )
-}
-
-function BusDot({ vehicleId, lat, lon, trail, direction, destination, nextStopName,
-                  minutesToNextStop, routeId, isAllMode, isBunched, reachingPolyline }) {
-  const dotColor   = getBusColor(routeId, direction, isAllMode)
-  const trailColor = isBunched ? '#e63946' : dotColor
-  const fillColor  = isBunched ? '#e63946' : dotColor
+function BusDot({ vehicleId, lat, lon, direction, destination, nextStopName,
+                  minutesToNextStop, routeId, isAllMode, isBunched }) {
+  const dotColor  = getBusColor(routeId, direction, isAllMode)
+  const fillColor = isBunched ? '#e63946' : dotColor
 
   return (
     <>
-      <ReachingLine positions={reachingPolyline} isBunched={isBunched} color={dotColor} />
-      {trail.length >= 2 && (
-        <Polyline
-          positions={trail}
-          pathOptions={{ color: trailColor, opacity: 1, weight: 5, lineCap: 'round', lineJoin: 'round' }}
-        />
-      )}
-      {/* Pulsing glow ring behind bunched bus dot */}
-      {isBunched && (
-        <CircleMarker
-          center={[lat, lon]}
-          radius={16}
-          bubblingMouseEvents={false}
-          pathOptions={{ color: '#e63946', fillColor: '#e63946', fillOpacity: 0.18, weight: 0 }}
-        />
-      )}
       <CircleMarker
         center={[lat, lon]}
         radius={9}
@@ -871,7 +851,6 @@ export default function App() {
   const [lastUpdated,      setLastUpdated]      = useState(null)
 
   const rawBusDataRef      = useRef({})
-  const trailsRef          = useRef({})
   const routePolylinesRef  = useRef({})
   const arrivalsTimerRef   = useRef(null)
 
@@ -896,27 +875,14 @@ export default function App() {
         const polyline = routePolylinesRef.current[busData.routeId]
         const { lat, lon, minutesToNextStop } = deadReckonPosition(busData, now, polyline)
 
-        if (!trailsRef.current[vehicleId]) trailsRef.current[vehicleId] = []
-        const trail = trailsRef.current[vehicleId]
-        trail.push([lat, lon])
-        if (trail.length > TRAIL_LENGTH_SECONDS) trail.shift()
-
-        const reachingPolyline = extractReachingPolyline(
-          lat, lon, polyline,
-          busData.afterStopPolylineIdx,
-          busData.nextStopPolylineIdx,
-        )
-
         updated.push({
           vehicleId, lat, lon,
-          trail: [...trail],
           direction:            busData.direction,
           destination:          busData.destination,
           nextStopName:         busData.nextStopName,
           minutesToNextStop,
           routeId:              busData.routeId,
           afterStopPolylineIdx: busData.afterStopPolylineIdx,
-          reachingPolyline,
         })
       })
 
@@ -974,7 +940,6 @@ export default function App() {
   // ── Route change: clear state, load OSRM first, then arrivals ────────────
   useEffect(() => {
     rawBusDataRef.current     = {}
-    trailsRef.current         = {}
     routePolylinesRef.current = {}
     setAnimatedBuses([])
     setRouteHeadways({})
@@ -1026,10 +991,6 @@ export default function App() {
             loadArrivals(routeId, outStops, inStops)
           )
         )
-        const activeIds = new Set(Object.keys(rawBusDataRef.current))
-        Object.keys(trailsRef.current).forEach(id => {
-          if (!activeIds.has(id)) delete trailsRef.current[id]
-        })
 
         arrivalsTimerRef.current = setInterval(async () => {
           await Promise.all(
@@ -1128,10 +1089,7 @@ export default function App() {
               pathOptions={{ color: isNightMode ? '#555' : '#bbb', fillColor: isNightMode ? '#555' : '#bbb', fillOpacity: 1, weight: 0 }} />
           ))}
 
-          {/* Live-only (and heatmap off): bus dots, trails, bunching */}
-          {!isStaticView && !heatmapVisible && bunchingPairs.map(({ rear, front }) => (
-            <BunchingBand key={`bunch-${rear.vehicleId}`} rear={rear} front={front} />
-          ))}
+          {/* Live-only (and heatmap off): bus dots */}
           {!isStaticView && !heatmapVisible && animatedBuses.map(bus => (
             <BusDot
               key={bus.vehicleId}
