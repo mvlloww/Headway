@@ -1,11 +1,45 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 const TFL_RED = '#dc241f'
 
 // Oyster card reader button — amber pad, thick dark bezel, card+swoosh logo
-function OysterButton({ onClick }) {
+function OysterButton({ onClick, isLoading }) {
+  const [hovered, setHovered] = useState(false)
+  const [pressed, setPressed] = useState(false)
+
+  const scale = pressed ? 0.93 : hovered ? 1.05 : 1
+  const shadow = pressed
+    ? 'inset 0 6px 14px rgba(0,0,0,0.55), inset 0 -1px 2px rgba(255,220,80,0.1), 0 2px 6px rgba(0,0,0,0.25)'
+    : hovered
+    ? 'inset 0 2px 6px rgba(0,0,0,0.25), inset 0 -3px 6px rgba(255,220,100,0.4), 0 10px 30px rgba(0,0,0,0.35)'
+    : 'inset 0 3px 8px rgba(0,0,0,0.35), inset 0 -2px 4px rgba(255,220,100,0.3), 0 6px 20px rgba(0,0,0,0.3)'
+
   return (
-    <button onClick={onClick} style={s.oyster} aria-label="Tap On">
+    <div style={{ position: 'relative', display: 'inline-block' }}>
+      {/* Spinning arc ring — visible while loading */}
+      {isLoading && (
+        <div className="oyster-ring" style={s.ring} />
+      )}
+
+      <button
+        onClick={isLoading ? undefined : onClick}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => { setHovered(false); setPressed(false) }}
+        onMouseDown={() => setPressed(true)}
+        onMouseUp={() => setPressed(false)}
+        onTouchStart={() => setPressed(true)}
+        onTouchEnd={() => setPressed(false)}
+        aria-label="Tap On"
+        style={{
+          ...s.oyster,
+          transform: `scale(${scale})`,
+          transition: pressed
+            ? 'transform 0.08s ease, box-shadow 0.08s ease'
+            : 'transform 0.2s ease, box-shadow 0.2s ease',
+          boxShadow: shadow,
+          cursor: isLoading ? 'default' : 'pointer',
+        }}
+      >
       {/* Oyster card + swoosh logo */}
       <svg viewBox="0 0 80 60" style={{ width: 80, height: 60 }}>
         {/* Card shape — slightly tilted */}
@@ -23,7 +57,8 @@ function OysterButton({ onClick }) {
           strokeLinecap="round"
         />
       </svg>
-    </button>
+      </button>
+    </div>
   )
 }
 
@@ -63,7 +98,7 @@ export default function Landing({ phase, onTap, onFadeEnd }) {
 
         {/* Oyster tap button */}
         <div style={s.buttonArea}>
-          <OysterButton onClick={isSpinning ? undefined : onTap} />
+          <OysterButton onClick={onTap} isLoading={isSpinning} />
           <span style={s.tapLabel}>Tap On</span>
         </div>
 
@@ -126,6 +161,19 @@ const s = {
     flexDirection: 'column',
     alignItems: 'center',
     gap: 16,
+  },
+
+  // Spinning ring outside the bezel — loading indicator
+  ring: {
+    position: 'absolute',
+    top: -10, left: -10,
+    width: 150, height: 150,
+    borderRadius: '50%',
+    border: '3px solid transparent',
+    borderTopColor: '#f7b731',
+    borderRightColor: '#f7b731',
+    pointerEvents: 'none',
+    zIndex: 1,
   },
 
   // Oyster reader: thick dark bezel + amber pad

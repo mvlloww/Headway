@@ -26,6 +26,14 @@ html, body, #root {
   animation: spinArrow 1.4s linear infinite;
   transform-origin: 50% 50%;
 }
+@keyframes spinRing {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.oyster-ring {
+  animation: spinRing 1s linear infinite;
+}
+
 @keyframes fadeOutLanding {
   from { opacity: 1; }
   to   { opacity: 0; }
