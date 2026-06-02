@@ -4,8 +4,8 @@ import 'leaflet/dist/leaflet.css'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const SUPPORTED_DAY_ROUTES   = ['11', '22', '33', '55', '88', '3', '25', '134', '52', '149', '101', '53', '72']
-const SUPPORTED_NIGHT_ROUTES  = ['N11', 'N55', 'N29', 'N38', 'N25', 'N53', 'N207']
+const SUPPORTED_DAY_ROUTES   = ['3', '11', '22', '25', '33', '52', '53', '55', '72', '88', '101', '134', '149']
+const SUPPORTED_NIGHT_ROUTES  = ['N11', 'N25', 'N29', 'N38', 'N53', 'N55', 'N207']
 const DEFAULT_ROUTE           = 'all'
 const ARRIVALS_REFRESH_INTERVAL_MS = 30_000
 const DEAD_RECKONING_TICK_MS  = 1_000
@@ -527,6 +527,7 @@ function RouteDropdown({ selectedRoute, onRouteChange, availableRoutes }) {
 
       {isOpen && (
         <div style={styles.dropdownPanel}>
+          {/* "All routes" always at top, outside the scroll area */}
           <div
             onMouseEnter={() => setHovered('all')}
             onMouseLeave={() => setHovered(null)}
@@ -537,7 +538,11 @@ function RouteDropdown({ selectedRoute, onRouteChange, availableRoutes }) {
             {selectedRoute === 'all' && <span style={styles.dropdownCheck}>✓</span>}
           </div>
           <div style={styles.dropdownDivider} />
-          {availableRoutes.map(route => (
+          {/* Individual routes — sorted numerically, scrollable 5 at a time */}
+          <div className="route-dropdown-scroll" style={styles.dropdownScroll}>
+          {[...availableRoutes]
+            .sort((a, b) => parseInt(a.replace(/^N/, ''), 10) - parseInt(b.replace(/^N/, ''), 10))
+            .map(route => (
             <div
               key={route}
               onMouseEnter={() => setHovered(route)}
@@ -551,6 +556,7 @@ function RouteDropdown({ selectedRoute, onRouteChange, availableRoutes }) {
               {selectedRoute === route && <span style={styles.dropdownCheck}>✓</span>}
             </div>
           ))}
+          </div>
         </div>
       )}
     </div>
@@ -1254,6 +1260,13 @@ const styles = {
   },
   dropdownDivider: {
     height: 1, background: 'rgba(255,255,255,0.08)', margin: '4px 8px',
+  },
+
+  // Shows 5 routes at a time; scrolls to reveal the rest
+  dropdownScroll: {
+    maxHeight: 220, // ~44px per option × 5
+    overflowY: 'auto',
+    overflowX: 'hidden',
   },
 
   heatmapNoDataNote: {
