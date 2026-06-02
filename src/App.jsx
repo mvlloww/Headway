@@ -103,13 +103,30 @@ async function fetchStopSequence(routeId, direction) {
 
 async function fetchOsrmRoute(stops) {
   if (stops.length < 2) return null
-  const coordString = stops.map(s => `${s.lon},${s.lat}`).join(';')
+  // Subsample to ≤30 waypoints — avoids URL length limits and OSRM timeouts on
+  // long outer routes like X26 (Heathrow–Croydon) that have 100+ stops.
+  let sample = stops
+  if (stops.length > 30) {
+    const step = Math.ceil(stops.length / 28)
+    sample = stops.filter((_, i) => i === 0 || i === stops.length - 1 || i % step === 0)
+  }
+  const coordString = sample.map(s => `${s.lon},${s.lat}`).join(';')
   const url = `https://router.project-osrm.org/route/v1/driving/${coordString}?overview=full&geometries=geojson`
-  const response = await fetch(url)
-  if (!response.ok) return null
-  const data = await response.json()
-  if (!data.routes || data.routes.length === 0) return null
-  return data.routes[0].geometry.coordinates.map(([lon, lat]) => [lat, lon])
+  try {
+    const response = await fetch(url)
+    if (!response.ok) return null
+    const data = await response.json()
+    if (!data.routes || data.routes.length === 0) return null
+    return data.routes[0].geometry.coordinates.map(([lon, lat]) => [lat, lon])
+  } catch {
+    return null
+  }
+}
+
+// Direct stop-to-stop polyline — used as fallback when OSRM fails or times out.
+function stopsToPolyline(stops) {
+  if (stops.length < 2) return null
+  return stops.map(s => [s.lat, s.lon])
 }
 
 // ─── Bus interpolation ────────────────────────────────────────────────────────
@@ -985,15 +1002,18 @@ export default function App() {
       const osrmResults = await Promise.all(
         geometries.map(async ({ routeId, outStops }) => ({
           routeId,
+          outStops,
           polyline: await fetchOsrmRoute(outStops),
         }))
       )
 
       const newPolylines = {}
-      osrmResults.forEach(({ routeId, polyline }) => {
-        if (polyline) {
-          newPolylines[routeId] = polyline
-          routePolylinesRef.current[routeId] = polyline // available to dead reckoning tick
+      osrmResults.forEach(({ routeId, polyline, outStops }) => {
+        // Fall back to direct stop-sequence line if OSRM fails or times out
+        const routeLine = polyline || stopsToPolyline(outStops)
+        if (routeLine) {
+          newPolylines[routeId] = routeLine
+          routePolylinesRef.current[routeId] = routeLine
         }
       })
       setRoutePolylines(newPolylines)
