@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
+import Landing from './Landing.jsx'
 import { MapContainer, TileLayer, CircleMarker, Polyline, Popup, useMapEvents } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 
@@ -979,6 +980,7 @@ function DebugTimestamp({ lastUpdated }) {
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
+  const [landingPhase,     setLandingPhase]     = useState('visible') // 'visible'|'spinning'|'fading'|'done'
   const [isNightMode,      setIsNightMode]      = useState(false)
   const [viewMode,         setViewMode]         = useState('live') // 'live' | 'static'
   const [heatmapVisible,   setHeatmapVisible]   = useState(false)
@@ -1270,6 +1272,18 @@ export default function App() {
 
         <DebugTimestamp lastUpdated={lastUpdated} />
       </div>
+
+      {/* Landing overlay — sits on top, fades out on tap */}
+      {landingPhase !== 'done' && (
+        <Landing
+          phase={landingPhase}
+          onTap={() => {
+            setLandingPhase('spinning')
+            setTimeout(() => setLandingPhase('fading'), 1800)
+          }}
+          onFadeEnd={() => setLandingPhase('done')}
+        />
+      )}
     </div>
   )
 }

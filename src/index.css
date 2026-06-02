@@ -17,6 +17,24 @@ html, body, #root {
   cursor: default;
 }
 
+/* Landing page — arrow spin and overlay fade */
+@keyframes spinArrow {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.landing-arrow-spin {
+  animation: spinArrow 1.4s linear infinite;
+  transform-origin: 50% 50%;
+}
+@keyframes fadeOutLanding {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+.landing-fading {
+  animation: fadeOutLanding 0.9s ease forwards;
+  pointer-events: none;
+}
+
 /* Bus blind scroll animation — new text rolls up from below */
 @keyframes blindIn {
   from { transform: translateY(100%); opacity: 0; }
