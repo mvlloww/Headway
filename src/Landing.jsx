@@ -96,6 +96,8 @@ export default function Landing({ phase, onTap, onFadeEnd }) {
           <OysterButton onClick={onTap} isLoading={isSpinning} />
         </div>
 
+        <p style={s.disclaimer}>Not all London bus routes have been added to this visualisation.</p>
+
       </div>
     </div>
   )
@@ -156,6 +158,17 @@ const s = {
     flexDirection: 'column',
     alignItems: 'center',
     gap: 16,
+    marginBottom: 40,
+  },
+
+  disclaimer: {
+    fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
+    fontSize: 11,
+    color: '#bbb',
+    textAlign: 'center',
+    margin: 0,
+    letterSpacing: '0.02em',
+    lineHeight: 1.5,
   },
 
   // Spinning ring outside the bezel — loading indicator

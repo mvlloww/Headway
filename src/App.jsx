@@ -977,10 +977,17 @@ function DebugTimestamp({ lastUpdated }) {
   return <div style={styles.timestampPill}>{timeString}</div>
 }
 
+// ─── Geometry cache ───────────────────────────────────────────────────────────
+// Module-level Map — survives route selection changes, cleared only on page reload.
+// Keyed by routeId; stores stops + OSRM polyline so revisiting a route is instant.
+const geometryCache = new Map()
+// { routeId → { outStops, inStops, osrmPolyline } }
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [landingPhase,     setLandingPhase]     = useState('visible') // 'visible'|'spinning'|'fading'|'done'
+  const [landingPhase,     setLandingPhase]     = useState('visible')
+  const [transitioning,    setTransitioning]    = useState(false) // 'visible'|'spinning'|'fading'|'done'
   const [isNightMode,      setIsNightMode]      = useState(false)
   const [viewMode,         setViewMode]         = useState('live') // 'live' | 'static'
   const [heatmapVisible,   setHeatmapVisible]   = useState(false)
@@ -1081,54 +1088,52 @@ export default function App() {
     }
   }, [])
 
-  // ── Route change: clear state, load OSRM first, then arrivals ────────────
+  // ── Route change: clear live data, load/restore geometry, then arrivals ──
   useEffect(() => {
     rawBusDataRef.current     = {}
     routePolylinesRef.current = {}
     setAnimatedBuses([])
     setRouteHeadways({})
-    setRouteStops({})
-    setRoutePolylines({})
+    setTransitioning(true) // fade in the overlay to cover the old route
     if (arrivalsTimerRef.current) clearInterval(arrivalsTimerRef.current)
 
     const routes = selectedRoute === 'all' ? currentRoutes : [selectedRoute]
 
     async function initialize() {
-      // 1. Fetch stop sequences for all active routes in parallel
+      // Resolve geometry for each route — from cache if available, otherwise fetch.
+      // Cache persists for the lifetime of the page so revisiting a route is instant.
       const geometries = await Promise.all(routes.map(async routeId => {
+        if (geometryCache.has(routeId)) {
+          const cached = geometryCache.get(routeId)
+          // Re-populate the polyline ref (was cleared above)
+          if (cached.osrmPolyline) routePolylinesRef.current[routeId] = cached.osrmPolyline
+          return { routeId, outStops: cached.outStops, inStops: cached.inStops, osrmPolyline: cached.osrmPolyline }
+        }
+
+        // Not in cache — fetch stops first, then OSRM (needs outbound stops)
         const [outStops, inStops] = await Promise.all([
           fetchStopSequence(routeId, 'outbound'),
           fetchStopSequence(routeId, 'inbound'),
         ])
-        return { routeId, outStops, inStops }
+        const osrmPolyline = await fetchOsrmRoute(outStops)
+
+        geometryCache.set(routeId, { outStops, inStops, osrmPolyline })
+        return { routeId, outStops, inStops, osrmPolyline }
       }))
 
       const newRouteStops = {}
-      geometries.forEach(({ routeId, outStops, inStops }) => {
+      const newPolylines  = {}
+      geometries.forEach(({ routeId, outStops, inStops, osrmPolyline }) => {
         newRouteStops[routeId] = { outboundStops: outStops, inboundStops: inStops }
-      })
-      setRouteStops(newRouteStops)
-
-      // 2. Fetch OSRM route lines (outbound geometry, one per route) in parallel
-      //    Do this BEFORE arrivals so dead reckoning can snap to road from first tick.
-      const osrmResults = await Promise.all(
-        geometries.map(async ({ routeId, outStops }) => ({
-          routeId,
-          outStops,
-          polyline: await fetchOsrmRoute(outStops),
-        }))
-      )
-
-      const newPolylines = {}
-      osrmResults.forEach(({ routeId, polyline, outStops }) => {
-        // Fall back to direct stop-sequence line if OSRM fails or times out
-        const routeLine = polyline || stopsToPolyline(outStops)
+        const routeLine = osrmPolyline || stopsToPolyline(outStops)
         if (routeLine) {
           newPolylines[routeId] = routeLine
           routePolylinesRef.current[routeId] = routeLine
         }
       })
+      setRouteStops(newRouteStops)
       setRoutePolylines(newPolylines)
+      setTransitioning(false) // geometry ready — fade out the overlay
 
       // 3. Fetch arrivals — polyline is now in ref so stop→index mapping works
       // 4. Live-only: fetch arrivals and start refresh interval
@@ -1269,6 +1274,15 @@ export default function App() {
           viewMode={viewMode}               onToggleViewMode={() => setViewMode(v => v === 'live' ? 'static' : 'live')}
           heatmapVisible={heatmapVisible}   onToggleHeatmap={handleToggleHeatmap}
         />
+
+        {/* Transition overlay — fades in on route change, out once geometry is ready */}
+        <div style={{
+          position: 'absolute', inset: 0, zIndex: 500,
+          background: mapBg,
+          opacity: transitioning ? 1 : 0,
+          transition: transitioning ? 'opacity 0.12s ease' : 'opacity 0.4s ease',
+          pointerEvents: 'none',
+        }} />
 
         <DebugTimestamp lastUpdated={lastUpdated} />
       </div>
