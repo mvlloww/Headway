@@ -78,6 +78,34 @@ const ROUTE_DESTINATIONS = {
 const DAY_SERVICE_HOURS   = '05:30 – 00:30'
 const NIGHT_SERVICE_HOURS = '00:00 – 06:00'
 
+// Notable places each route passes — stored as arrays for easy expansion
+const ROUTE_LANDMARKS = {
+  '3':   ['Brixton Academy', 'Lambeth Palace', 'Crystal Palace Park'],
+  '11':  ["King's Road Chelsea", 'Victoria Station', "St Paul's Cathedral"],
+  '22':  ['Green Park', 'Hyde Park Corner', 'Sloane Square'],
+  '25':  ["St Paul's Cathedral", 'Bank of England', 'Stratford'],
+  '33':  ['Hammersmith Apollo', 'Chiswick House', 'Richmond Bridge'],
+  '52':  ['Notting Hill Gate', 'Ladbroke Grove', 'Kensal Rise'],
+  '53':  ['Trafalgar Square', 'Elephant & Castle', 'Greenwich'],
+  '55':  ['Oxford Circus', 'Bloomsbury', 'Old Street'],
+  '72':  ["Shepherd's Bush", 'Hammersmith', 'Putney Bridge'],
+  '88':  ['Clapham Common', 'Vauxhall', 'Trafalgar Square'],
+  '101': ['Stratford Westfield', 'West Ham', 'Royal Docks'],
+  '134': ['Archway', 'Highgate Village', 'East Finchley'],
+  '149': ['Liverpool Street', 'Stoke Newington', 'Tottenham'],
+  '350': ['Romford Market', 'Hornchurch', 'Lakeside Shopping Centre'],
+  '370': ['Lakeside', 'Tilbury Docks', 'Thames Estuary'],
+  '405': ['East Croydon', 'Coulsdon', 'Redhill (Surrey)'],
+  '465': ['Kingston upon Thames', 'Leatherhead', 'Dorking (beyond M25)'],
+  'N11': ["King's Road", 'Westminster', 'Liverpool Street'],
+  'N25': ['Oxford Circus', 'Bank', 'Stratford'],
+  'N29': ['Trafalgar Square', 'Finsbury Park', 'Wood Green'],
+  'N38': ['Victoria', 'Hackney', 'Clapton'],
+  'N53': ['Whitehall', 'Elephant & Castle', 'Plumstead'],
+  'N55': ['Oxford Circus', 'Shoreditch', 'Leyton'],
+  'N207':['Shepherd\'s Bush', 'Ealing', 'Uxbridge'],
+}
+
 // ─── TfL & OSRM API helpers ───────────────────────────────────────────────────
 
 async function fetchArrivals(routeId) {
@@ -126,6 +154,22 @@ async function fetchOsrmRoute(stops) {
 function stopsToPolyline(stops) {
   if (stops.length < 2) return null
   return stops.map(s => [s.lat, s.lon])
+}
+
+function calculatePolylineDistanceKm(polyline) {
+  if (!polyline || polyline.length < 2) return 0
+  let total = 0
+  for (let i = 1; i < polyline.length; i++) {
+    const [lat1, lon1] = polyline[i - 1]
+    const [lat2, lon2] = polyline[i]
+    const R    = 6371
+    const dLat = (lat2 - lat1) * Math.PI / 180
+    const dLon = (lon2 - lon1) * Math.PI / 180
+    const a    = Math.sin(dLat / 2) ** 2
+      + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon / 2) ** 2
+    total += R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+  }
+  return Math.round(total * 10) / 10
 }
 
 // ─── Bus interpolation ────────────────────────────────────────────────────────
@@ -584,6 +628,73 @@ function RouteDropdown({ selectedRoute, onRouteChange, availableRoutes }) {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ─── Route facts chip ─────────────────────────────────────────────────────────
+
+function RouteFacts({ selectedRoute, isAllMode, routeStops, routePolylines, animatedBuses, currentRoutes }) {
+  if (isAllMode) {
+    // Aggregate summary across all loaded routes
+    const totalBuses    = animatedBuses.length
+    const loadedRoutes  = Object.keys(routePolylines)
+    const totalStops    = Object.values(routeStops).reduce((sum, d) => sum + d.outboundStops.length, 0)
+    const totalDistKm   = loadedRoutes.reduce((sum, id) => sum + calculatePolylineDistanceKm(routePolylines[id]), 0)
+
+    if (loadedRoutes.length === 0) return null
+
+    return (
+      <div style={styles.factChip}>
+        <div style={styles.factTitle}>All Routes</div>
+        <div style={styles.factDivider} />
+        <div style={styles.factGrid}>
+          <FactRow label="Buses running" value={totalBuses} />
+          <FactRow label="Routes loaded"  value={loadedRoutes.length} />
+          <FactRow label="Combined dist."  value={`${Math.round(totalDistKm)} km`} />
+          <FactRow label="Total stops"    value={totalStops} />
+        </div>
+      </div>
+    )
+  }
+
+  // Single route
+  const stops       = routeStops[selectedRoute]
+  const polyline    = routePolylines[selectedRoute]
+  const busCount    = animatedBuses.filter(b => b.routeId === selectedRoute).length
+  const stopCount   = stops ? stops.outboundStops.length : '—'
+  const distKm      = polyline ? calculatePolylineDistanceKm(polyline) : null
+  const landmarks   = ROUTE_LANDMARKS[selectedRoute] || []
+
+  if (!polyline && !stops) return null
+
+  return (
+    <div style={styles.factChip}>
+      <div style={styles.factTitle}>Route {selectedRoute}</div>
+      <div style={styles.factDivider} />
+      <div style={styles.factGrid}>
+        <FactRow label="Buses running" value={busCount} />
+        <FactRow label="Stops"         value={stopCount} />
+        {distKm !== null && <FactRow label="Distance" value={`${distKm} km`} />}
+      </div>
+      {landmarks.length > 0 && (
+        <>
+          <div style={styles.factDivider} />
+          <div style={styles.factLandmarkLabel}>Passes</div>
+          {landmarks.map(l => (
+            <div key={l} style={styles.factLandmark}>{l}</div>
+          ))}
+        </>
+      )}
+    </div>
+  )
+}
+
+function FactRow({ label, value }) {
+  return (
+    <div style={styles.factRow}>
+      <span style={styles.factLabel}>{label}</span>
+      <span style={styles.factValue}>{value}</span>
     </div>
   )
 }
@@ -1134,6 +1245,15 @@ export default function App() {
           ))}
         </MapContainer>
 
+        <RouteFacts
+          selectedRoute={selectedRoute}
+          isAllMode={isAllMode}
+          routeStops={routeStops}
+          routePolylines={routePolylines}
+          animatedBuses={animatedBuses}
+          currentRoutes={currentRoutes}
+        />
+
         {!isStaticView && !heatmapVisible && <Legend />}
         {heatmapVisible && (
           <HeatmapLegend routeHeadways={routeHeadways} loadedRouteIds={loadedRouteIds} />
@@ -1295,6 +1415,48 @@ const styles = {
     maxHeight: 220, // ~44px per option × 5
     overflowY: 'auto',
     overflowX: 'hidden',
+  },
+
+  // ── Route facts chip ──────────────────────────────────────────────────────
+
+  factChip: {
+    position: 'absolute', top: 20, left: 20, zIndex: 1000,
+    background: '#0d0d0d', borderRadius: 14, padding: '12px 16px',
+    boxShadow: '0 4px 20px rgba(0,0,0,0.35)', pointerEvents: 'none',
+    minWidth: 180, maxWidth: 220,
+  },
+  factTitle: {
+    fontSize: 13, fontWeight: 700, color: '#fff',
+    fontFamily: 'Inter, system-ui, sans-serif',
+    letterSpacing: '-0.2px', marginBottom: 8,
+  },
+  factDivider: {
+    height: 1, background: 'rgba(255,255,255,0.08)', margin: '8px 0',
+  },
+  factGrid: {
+    display: 'flex', flexDirection: 'column', gap: 5,
+  },
+  factRow: {
+    display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12,
+  },
+  factLabel: {
+    fontSize: 11, color: 'rgba(255,255,255,0.4)',
+    fontFamily: 'Inter, system-ui, sans-serif',
+  },
+  factValue: {
+    fontSize: 13, fontWeight: 600, color: '#fff',
+    fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
+    letterSpacing: '-0.3px',
+  },
+  factLandmarkLabel: {
+    fontSize: 10, fontWeight: 600, letterSpacing: '0.08em',
+    textTransform: 'uppercase', color: 'rgba(255,255,255,0.3)',
+    fontFamily: 'Inter, system-ui, sans-serif', marginBottom: 5,
+  },
+  factLandmark: {
+    fontSize: 12, color: 'rgba(255,255,255,0.65)',
+    fontFamily: 'Inter, system-ui, sans-serif',
+    lineHeight: 1.5,
   },
 
   heatmapNoDataNote: {
