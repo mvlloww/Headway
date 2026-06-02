@@ -494,11 +494,11 @@ function BusDot({ vehicleId, lat, lon, direction, destination, nextStopName,
             <div style={styles.popupDestination}>→ {destination}</div>
             <div style={styles.popupDetail}>
               <span style={styles.popupLabel}>Next stop</span>
-              <span>{nextStopName}</span>
+              <span style={styles.popupValue}>{nextStopName}</span>
             </div>
             <div style={styles.popupDetail}>
               <span style={styles.popupLabel}>ETA</span>
-              <span>{minutesToNextStop} min</span>
+              <span style={styles.popupValue}>{minutesToNextStop} min</span>
             </div>
             <div style={styles.popupVehicle}>Vehicle {vehicleId}</div>
           </div>
@@ -1535,25 +1535,26 @@ const styles = {
 
   // ── Popup ──────────────────────────────────────────────────────────────────
 
-  popup: { minWidth: 180 },
+  popup: { minWidth: 190 },
   popupBunching: {
     fontSize: 11, fontWeight: 600, color: '#e63946',
     marginBottom: 6, letterSpacing: '0.03em',
   },
   popupRoute: {
-    fontSize: 11, fontWeight: 600, letterSpacing: '0.08em',
+    fontSize: 11, fontWeight: 700, letterSpacing: '0.1em',
     textTransform: 'uppercase', color: '#e67300', marginBottom: 4,
   },
   popupDestination: {
-    fontSize: 15, fontWeight: 600, color: '#f9f7f4', marginBottom: 10, lineHeight: 1.3,
+    fontSize: 16, fontWeight: 600, color: '#1a1a1a', marginBottom: 12, lineHeight: 1.3,
   },
   popupDetail: {
-    display: 'flex', justifyContent: 'space-between', gap: 16,
-    marginBottom: 3, color: '#ccc', fontSize: 12,
+    display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 16,
+    marginBottom: 5, fontSize: 13,
   },
-  popupLabel: { color: '#777' },
+  popupLabel: { color: '#888', fontWeight: 400 },
+  popupValue: { color: '#1a1a1a', fontWeight: 500 },
   popupVehicle: {
-    marginTop: 8, paddingTop: 8, borderTop: '1px solid #333',
-    fontSize: 11, color: '#555', fontVariantNumeric: 'tabular-nums',
+    marginTop: 10, paddingTop: 10, borderTop: '1px solid #ebebeb',
+    fontSize: 12, color: '#aaa', fontVariantNumeric: 'tabular-nums',
   },
 }
