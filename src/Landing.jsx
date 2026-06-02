@@ -2,6 +2,31 @@ import { useEffect, useRef } from 'react'
 
 const TFL_RED = '#dc241f'
 
+// Oyster card reader button — amber pad, thick dark bezel, card+swoosh logo
+function OysterButton({ onClick }) {
+  return (
+    <button onClick={onClick} style={s.oyster} aria-label="Tap On">
+      {/* Oyster card + swoosh logo */}
+      <svg viewBox="0 0 80 60" style={{ width: 80, height: 60 }}>
+        {/* Card shape — slightly tilted */}
+        <rect
+          x="16" y="4" width="42" height="28" rx="5" ry="5"
+          fill="rgba(255,255,255,0.88)"
+          transform="rotate(-8, 37, 18)"
+        />
+        {/* Swoosh / arc beneath the card */}
+        <path
+          d="M 8 46 Q 40 28 72 46"
+          stroke="rgba(255,255,255,0.65)"
+          strokeWidth="3.5"
+          fill="none"
+          strokeLinecap="round"
+        />
+      </svg>
+    </button>
+  )
+}
+
 export default function Landing({ phase, onTap, onFadeEnd }) {
   const isSpinning = phase === 'spinning' || phase === 'fading'
   const overlayRef = useRef(null)
@@ -16,78 +41,30 @@ export default function Landing({ phase, onTap, onFadeEnd }) {
     <div
       ref={overlayRef}
       className={phase === 'fading' ? 'landing-fading' : ''}
-      style={styles.overlay}
+      style={s.overlay}
     >
-      <div style={styles.content}>
+      <div style={s.content}>
 
-        <p style={styles.headline}>London runs on 9,000 buses.</p>
+        {/* Headline — left-aligned, factual opener */}
+        <p style={s.headline}>London runs on 9,000 buses</p>
 
-        <div style={styles.block}>
-          <p style={styles.body}>Every day, over six million journeys.</p>
-          <p style={styles.body}>Every night, fifty routes that never sleep.</p>
+        {/* Listicle — centred, large, clean */}
+        <div style={s.listicleBlock}>
+          <p style={s.listicle}>The commute.</p>
+          <p style={s.listicle}>The school bus.</p>
+          <p style={s.listicle}>The night shift.</p>
+          <p style={s.listicle}>The rail replacement.</p>
         </div>
 
-        <div style={styles.block}>
-          <p style={styles.listicle}>The commute.</p>
-          <p style={styles.listicle}>The school run.</p>
-          <p style={styles.listicle}>The night shift.</p>
-          <p style={styles.listicle}>The last bus home.</p>
-        </div>
+        {/* One quiet fact line */}
+        <p style={s.fact}>
+          Some routes have run the same streets for over a hundred years.
+        </p>
 
-        <div style={styles.block}>
-          <p style={styles.body}>
-            One in six Londoners takes the bus every single day.
-          </p>
-          <p style={styles.body}>
-            Some routes have served the same streets for over a hundred years.
-          </p>
-        </div>
-
-        <div style={styles.block}>
-          <p style={styles.intro}>
-            <strong>Headway</strong> maps the live pulse of London's bus network —
-            every route, every bus, in real time.
-          </p>
-        </div>
-
-        {/* Oyster-style tap button */}
-        <div style={styles.buttonWrap}>
-          <button
-            onClick={isSpinning ? undefined : onTap}
-            style={{ ...styles.oysterButton, cursor: isSpinning ? 'default' : 'pointer' }}
-            aria-label="Enter Headway"
-          >
-            {/* Curved arrow — spins around the button centre when loading */}
-            <div className={isSpinning ? 'landing-arrow-spin' : ''} style={styles.arrowLayer}>
-              <svg
-                viewBox="0 0 140 140"
-                style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
-              >
-                <defs>
-                  <marker
-                    id="lp-arrowhead"
-                    markerWidth="7" markerHeight="7"
-                    refX="3.5" refY="3.5"
-                    orient="auto"
-                  >
-                    <polygon points="0,0 7,3.5 0,7" fill={TFL_RED} />
-                  </marker>
-                </defs>
-                {/* Quarter-circle arc from bottom-left to top-right inside the button */}
-                <path
-                  d="M 32 108 A 54 54 0 0 1 108 32"
-                  stroke={TFL_RED}
-                  strokeWidth="2.5"
-                  fill="none"
-                  markerEnd="url(#lp-arrowhead)"
-                />
-              </svg>
-            </div>
-
-            <span style={styles.tapLabel}>Tap On</span>
-          </button>
-
-          <p style={styles.tapHint}>tap to board</p>
+        {/* Oyster tap button */}
+        <div style={s.buttonArea}>
+          <OysterButton onClick={isSpinning ? undefined : onTap} />
+          <span style={s.tapLabel}>Tap On</span>
         </div>
 
       </div>
@@ -95,7 +72,7 @@ export default function Landing({ phase, onTap, onFadeEnd }) {
   )
 }
 
-const styles = {
+const s = {
   overlay: {
     position: 'fixed', inset: 0, zIndex: 9999,
     background: '#ffffff',
@@ -104,77 +81,77 @@ const styles = {
   },
 
   content: {
-    maxWidth: 560,
-    padding: '40px 32px',
+    maxWidth: 540,
     width: '100%',
+    padding: '0 36px',
   },
 
+  // "London runs on 9,000 buses" — top-left weight, not centred
   headline: {
-    fontSize: 36, fontWeight: 400, color: '#1a1a1a',
-    margin: '0 0 40px',
+    fontSize: 38,
+    fontWeight: 400,
+    color: '#1a1a1a',
+    margin: '0 0 56px',
     lineHeight: 1.2,
-    letterSpacing: '-0.5px',
+    letterSpacing: '-0.4px',
+    textAlign: 'left',
   },
 
-  block: {
-    marginBottom: 36,
-  },
-
-  body: {
-    fontSize: 18, fontWeight: 400, color: '#444',
-    margin: '0 0 6px',
-    lineHeight: 1.5,
+  listicleBlock: {
+    marginBottom: 52,
+    textAlign: 'center',
   },
 
   listicle: {
-    fontSize: 26, fontWeight: 400, color: '#1a1a1a',
+    fontSize: 28,
+    fontWeight: 400,
+    color: '#1a1a1a',
     margin: '0 0 2px',
-    lineHeight: 1.3,
-    letterSpacing: '-0.3px',
+    lineHeight: 1.35,
+    letterSpacing: '-0.2px',
   },
 
-  intro: {
-    fontSize: 17, fontWeight: 400, color: '#555',
-    lineHeight: 1.6,
-    margin: 0,
+  fact: {
+    fontSize: 16,
+    fontWeight: 400,
+    color: '#aaa',
+    margin: '0 0 60px',
+    textAlign: 'center',
+    lineHeight: 1.5,
+    letterSpacing: 0,
   },
 
-  buttonWrap: {
-    marginTop: 52,
-    display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 12,
+  buttonArea: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: 16,
   },
 
-  oysterButton: {
-    position: 'relative',
-    width: 140, height: 140,
+  // Oyster reader: thick dark bezel + amber pad
+  oyster: {
+    width: 130,
+    height: 130,
     borderRadius: '50%',
-    border: '2px solid #1a1a1a',
-    background: '#f9f9f9',
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    padding: 0,
+    border: '10px solid #1c1c1c',
+    background: 'radial-gradient(circle at 38% 38%, #f7b731, #e8970a)',
+    boxShadow:
+      'inset 0 3px 8px rgba(0,0,0,0.35), inset 0 -2px 4px rgba(255,220,100,0.3), 0 6px 20px rgba(0,0,0,0.3)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    cursor: 'pointer',
     outline: 'none',
-    transition: 'transform 0.15s, box-shadow 0.15s',
-  },
-
-  arrowLayer: {
-    position: 'absolute', inset: 0,
-    borderRadius: '50%',
-    overflow: 'visible',
+    padding: 0,
+    transition: 'transform 0.12s, box-shadow 0.12s',
   },
 
   tapLabel: {
-    fontSize: 22, fontWeight: 700,
+    fontSize: 20,
+    fontWeight: 700,
     color: TFL_RED,
+    letterSpacing: '-0.2px',
     fontFamily: 'Inter, system-ui, sans-serif',
-    letterSpacing: '-0.3px',
-    position: 'relative', // above the SVG layer
-    zIndex: 1,
     userSelect: 'none',
-  },
-
-  tapHint: {
-    fontSize: 12, color: '#bbb',
-    fontFamily: 'Inter, system-ui, sans-serif',
-    margin: 0, letterSpacing: '0.06em',
   },
 }
