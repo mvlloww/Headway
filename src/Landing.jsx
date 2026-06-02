@@ -89,12 +89,11 @@ export default function Landing({ phase, onTap, onFadeEnd }) {
           <p style={s.listicle}>The night shift.</p>
         </div>
 
-        <p style={s.tagline}>Tap on and explore the true hero of the London transport system.</p>
+        <p style={s.tagline}>Tap on and explore the true heroes of the London transport system. Watch live bus locations, see when they start bunching up, reveal which routes have higher frequencies than others, and dive into the night bus routes.</p>
 
         {/* Oyster tap button */}
         <div style={s.buttonArea}>
           <OysterButton onClick={onTap} isLoading={isSpinning} />
-          <span style={s.tapLabel}>Tap On</span>
         </div>
 
       </div>
@@ -142,14 +141,13 @@ const s = {
     letterSpacing: 0,
   },
 
-  // Left-aligned call-to-action line
   tagline: {
-    fontSize: 26,
+    fontSize: 20,
     fontWeight: 400,
     color: '#1a1a1a',
-    margin: '0 0 64px',
-    lineHeight: 1.4,
-    textAlign: 'left',
+    margin: '0 0 56px',
+    lineHeight: 1.6,
+    textAlign: 'center',
     letterSpacing: 0,
   },
 
@@ -191,12 +189,4 @@ const s = {
     transition: 'transform 0.12s, box-shadow 0.12s',
   },
 
-  tapLabel: {
-    fontSize: 20,
-    fontWeight: 700,
-    color: TFL_RED,
-    letterSpacing: '-0.2px',
-    fontFamily: 'Inter, system-ui, sans-serif',
-    userSelect: 'none',
-  },
 }
