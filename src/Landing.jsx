@@ -80,21 +80,16 @@ export default function Landing({ phase, onTap, onFadeEnd }) {
     >
       <div style={s.content}>
 
-        {/* Headline — left-aligned, factual opener */}
         <p style={s.headline}>London runs on 9,000 buses</p>
 
-        {/* Listicle — centred, large, clean */}
         <div style={s.listicleBlock}>
           <p style={s.listicle}>The commute.</p>
           <p style={s.listicle}>The school bus.</p>
-          <p style={s.listicle}>The night shift.</p>
           <p style={s.listicle}>The rail replacement.</p>
+          <p style={s.listicle}>The night shift.</p>
         </div>
 
-        {/* One quiet fact line */}
-        <p style={s.fact}>
-          Some routes have run the same streets for over a hundred years.
-        </p>
+        <p style={s.tagline}>Tap on and explore the true hero of the London transport system.</p>
 
         {/* Oyster tap button */}
         <div style={s.buttonArea}>
@@ -121,38 +116,40 @@ const s = {
     padding: '0 36px',
   },
 
-  // "London runs on 9,000 buses" — top-left weight, not centred
+  // Bold, centred, top
   headline: {
-    fontSize: 38,
-    fontWeight: 400,
+    fontSize: 28,
+    fontWeight: 700,
     color: '#1a1a1a',
-    margin: '0 0 56px',
+    margin: '0 0 48px',
     lineHeight: 1.2,
-    letterSpacing: '-0.4px',
-    textAlign: 'left',
+    letterSpacing: '-0.2px',
+    textAlign: 'center',
   },
 
+  // Centred listicle, regular weight
   listicleBlock: {
-    marginBottom: 52,
+    marginBottom: 44,
     textAlign: 'center',
   },
 
   listicle: {
-    fontSize: 28,
+    fontSize: 26,
     fontWeight: 400,
     color: '#1a1a1a',
-    margin: '0 0 2px',
-    lineHeight: 1.35,
-    letterSpacing: '-0.2px',
+    margin: 0,
+    lineHeight: 1.5,
+    letterSpacing: 0,
   },
 
-  fact: {
-    fontSize: 16,
+  // Left-aligned call-to-action line
+  tagline: {
+    fontSize: 26,
     fontWeight: 400,
-    color: '#aaa',
-    margin: '0 0 60px',
-    textAlign: 'center',
-    lineHeight: 1.5,
+    color: '#1a1a1a',
+    margin: '0 0 64px',
+    lineHeight: 1.4,
+    textAlign: 'left',
     letterSpacing: 0,
   },
 
