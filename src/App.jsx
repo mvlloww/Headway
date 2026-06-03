@@ -98,6 +98,10 @@ const ROUTE_DESTINATIONS = {
 const DAY_SERVICE_HOURS   = '05:30 – 00:30'
 const NIGHT_SERVICE_HOURS = '00:00 – 06:00'
 
+// Colours assigned dynamically to rail replacement routes (dot, then lighter line)
+const REPLACEMENT_DOT_PALETTE  = ['#f59e0b','#ef4444','#8b5cf6','#06b6d4','#10b981','#f97316','#ec4899','#6366f1','#14b8a6','#a855f7']
+const REPLACEMENT_LINE_PALETTE = ['#fde68a','#fca5a5','#ddd6fe','#a5f3fc','#6ee7b7','#fed7aa','#fbcfe8','#c7d2fe','#99f6e4','#d8b4fe']
+
 // Notable places each route passes — stored as arrays for easy expansion
 const ROUTE_LANDMARKS = {
   '3':   ['Brixton Academy', 'Lambeth Palace', 'Crystal Palace Park'],
@@ -177,6 +181,17 @@ async function fetchOsrmRoute(stops) {
     return data.routes[0].geometry.coordinates.map(([lon, lat]) => [lat, lon])
   } catch {
     return null
+  }
+}
+
+async function fetchReplacementRouteIds() {
+  try {
+    const res = await fetch('https://api.tfl.gov.uk/Line/Mode/replacement-bus')
+    if (!res.ok) return []
+    const lines = await res.json()
+    return lines.map(l => l.id)
+  } catch {
+    return []
   }
 }
 
@@ -379,15 +394,17 @@ function deadReckonPosition(busData, nowMs, polyline) {
 const isNightRoute = routeId => routeId.startsWith('N')
 
 function getBusColor(routeId, direction, isAllMode) {
-  // Night routes always use their route colour — direction coding doesn't apply
-  if (isAllMode || isNightRoute(routeId)) return ROUTE_COLORS[routeId] || '#888'
+  if (isAllMode || isNightRoute(routeId)) {
+    return ROUTE_COLORS[routeId] || extraRouteColors[routeId] || '#888'
+  }
   return direction === 'inbound' ? INBOUND_COLOR : OUTBOUND_COLOR
 }
 
 function getRouteLineColor(routeId, isAllMode, viewMode) {
-  if (viewMode === 'static') return ROUTE_COLORS[routeId] || '#888'
-  // Night routes always use their lighter route colour even in single-route live view
-  if (isAllMode || isNightRoute(routeId)) return ROUTE_LINE_COLORS[routeId] || '#aaa'
+  if (viewMode === 'static') return ROUTE_COLORS[routeId] || extraRouteColors[routeId] || '#888'
+  if (isAllMode || isNightRoute(routeId)) {
+    return ROUTE_LINE_COLORS[routeId] || extraRouteLineColors[routeId] || '#aaa'
+  }
   return '#1a1a1a'
 }
 
@@ -649,7 +666,7 @@ function RouteDropdown({ selectedRoute, onRouteChange, availableRoutes }) {
               onClick={() => { onRouteChange(route); setIsOpen(false) }}
               style={{ ...styles.dropdownOption, background: hoveredRoute === route || selectedRoute === route ? '#2a2a2a' : 'transparent' }}
             >
-              <span style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: ROUTE_COLORS[route], display: 'inline-block' }} />
+              <span style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: ROUTE_COLORS[route] || extraRouteColors[route], display: 'inline-block' }} />
               <span style={styles.dropdownRouteNumber}>{route}</span>
               <span style={styles.dropdownRouteDest}>— {ROUTE_DESTINATIONS[route]}</span>
               {selectedRoute === route && <span style={styles.dropdownCheck}>✓</span>}
@@ -731,7 +748,9 @@ function FactRow({ label, value }) {
 
 // ─── Destination blind ─────────────────────────────────────────────────────────
 
-function DestinationBlind({ selectedRoute, onRouteChange, availableRoutes, isNightMode }) {
+function DestinationBlind({ selectedRoute, onRouteChange, availableRoutes, serviceMode }) {
+  const isNightMode       = serviceMode === 'night'
+  const isReplacementMode = serviceMode === 'replacement'
   return (
     <div style={styles.blindFloatRow}>
       <div style={{
@@ -739,11 +758,12 @@ function DestinationBlind({ selectedRoute, onRouteChange, availableRoutes, isNig
         background: isNightMode ? '#0a0a1a' : '#0d0d0d',
         boxShadow: isNightMode
           ? '0 8px 32px rgba(168,85,247,0.25), 0 2px 8px rgba(0,0,0,0.6)'
+          : isReplacementMode
+          ? '0 8px 32px rgba(245,158,11,0.25), 0 2px 8px rgba(0,0,0,0.6)'
           : '0 8px 32px rgba(0,0,0,0.45)',
       }}>
-        {isNightMode && (
-          <div style={styles.nightBadge}>N</div>
-        )}
+        {isNightMode       && <div style={styles.nightBadge}>N</div>}
+        {isReplacementMode && <div style={styles.replacementBadge}>RR</div>}
         <div style={styles.blindDestinationSection}>
           <AnimatedBlindText
             text={ROUTE_DESTINATIONS[selectedRoute] || selectedRoute}
@@ -803,7 +823,7 @@ function HeatmapLegend({ routeHeadways, loadedRouteIds }) {
 
 // ─── Digital clock ────────────────────────────────────────────────────────────
 
-function DigitalClock({ isNightMode }) {
+function DigitalClock({ serviceMode }) {
   const [now, setNow] = useState(new Date())
 
   useEffect(() => {
@@ -812,8 +832,14 @@ function DigitalClock({ isNightMode }) {
   }, [])
 
   const fmt = opts => now.toLocaleTimeString('en-GB', { timeZone: 'Europe/London', hour12: false, ...opts })
-  const hhmm   = fmt({ hour: '2-digit', minute: '2-digit' })
-  const secs   = fmt({ second: '2-digit' }).slice(-2)
+  const hhmm = fmt({ hour: '2-digit', minute: '2-digit' })
+  const secs = fmt({ second: '2-digit' }).slice(-2)
+
+  const isNightMode = serviceMode === 'night'
+  const label = serviceMode === 'replacement' ? '🔧 Rail replacement'
+    : isNightMode ? '🌙 Night service'
+    : '☀ Day service'
+  const hours = isNightMode ? NIGHT_SERVICE_HOURS : serviceMode === 'replacement' ? 'Engineering works' : DAY_SERVICE_HOURS
 
   return (
     <div style={{ ...styles.clock, ...(isNightMode ? styles.clockNight : {}) }}>
@@ -822,11 +848,9 @@ function DigitalClock({ isNightMode }) {
         <span style={styles.clockSS}>{secs}</span>
       </div>
       <div style={styles.clockDivider} />
-      <div style={styles.clockLabel}>
-        {isNightMode ? '🌙 Night service' : '☀ Day service'}
-      </div>
+      <div style={styles.clockLabel}>{label}</div>
       <div style={styles.clockHours}>
-        {isNightMode ? NIGHT_SERVICE_HOURS : DAY_SERVICE_HOURS}
+        {hours}
       </div>
     </div>
   )
@@ -970,9 +994,20 @@ function SunIcon() {
   )
 }
 
+// Wrench — rail replacement mode
+function WrenchIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+    </svg>
+  )
+}
+
 function ControlsPanel({ mapVisible, onToggleMap, stopsVisible, onToggleStops,
-                          routeLineVisible, onToggleRouteLine, isNightMode, onToggleNight,
+                          routeLineVisible, onToggleRouteLine, serviceMode, onSetServiceMode,
                           viewMode, onToggleViewMode, heatmapVisible, onToggleHeatmap }) {
+  const isNightMode       = serviceMode === 'night'
+  const isReplacementMode = serviceMode === 'replacement'
   return (
     <div style={styles.controlsPanel}>
       <IconButton
@@ -985,10 +1020,14 @@ function ControlsPanel({ mapVisible, onToggleMap, stopsVisible, onToggleStops,
       <IconButton active={heatmapVisible} onClick={onToggleHeatmap} title="Frequency heatmap">
         <HeatmapIcon />
       </IconButton>
-      <IconButton active={mapVisible}       onClick={onToggleMap}       title="Map tiles"><GlobeIcon /></IconButton>
-      <IconButton active={stopsVisible}     onClick={onToggleStops}     title="Bus stops"><StopsIcon /></IconButton>
-      <IconButton active={routeLineVisible} onClick={onToggleRouteLine} title="Route line"><RouteIcon /></IconButton>
-      <IconButton active={isNightMode}      onClick={onToggleNight}
+      <IconButton active={mapVisible}         onClick={onToggleMap}         title="Map tiles"><GlobeIcon /></IconButton>
+      <IconButton active={stopsVisible}       onClick={onToggleStops}       title="Bus stops"><StopsIcon /></IconButton>
+      <IconButton active={routeLineVisible}   onClick={onToggleRouteLine}   title="Route line"><RouteIcon /></IconButton>
+      <IconButton active={isReplacementMode}  onClick={() => onSetServiceMode(isReplacementMode ? 'day' : 'replacement')}
+        title={isReplacementMode ? 'Exit rail replacement' : 'Rail replacement buses'}>
+        <WrenchIcon />
+      </IconButton>
+      <IconButton active={isNightMode}        onClick={() => onSetServiceMode(isNightMode ? 'day' : 'night')}
         title={isNightMode ? 'Switch to day' : 'Switch to night'}>
         {isNightMode ? <SunIcon /> : <MoonIcon />}
       </IconButton>
@@ -1012,38 +1051,47 @@ function DebugTimestamp({ lastUpdated }) {
 const geometryCache = new Map()
 // { routeId → { outStops, inStops, osrmPolyline } }
 
+// Dynamic colours for replacement routes — populated when replacement mode activates.
+const extraRouteColors     = {}
+const extraRouteLineColors = {}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [landingPhase,     setLandingPhase]     = useState('visible')
-  const [transitioning,    setTransitioning]    = useState(false) // 'visible'|'spinning'|'fading'|'done'
-  const [isNightMode,      setIsNightMode]      = useState(false)
-  const [viewMode,         setViewMode]         = useState('live') // 'live' | 'static'
-  const [heatmapVisible,   setHeatmapVisible]   = useState(false)
-  const [selectedRoute,    setSelectedRoute]    = useState(DEFAULT_ROUTE)
-  const [mapVisible,       setMapVisible]       = useState(true)
-  const [stopsVisible,     setStopsVisible]     = useState(true)
-  const [routeLineVisible, setRouteLineVisible] = useState(true)
-  const [routeStops,       setRouteStops]       = useState({})
-  const [routePolylines,   setRoutePolylines]   = useState({})
-  const [routeHeadways,    setRouteHeadways]    = useState({}) // { routeId: minutes | null }
-  const [animatedBuses,    setAnimatedBuses]    = useState([])
-  const [lastUpdated,      setLastUpdated]      = useState(null)
+  const [landingPhase,      setLandingPhase]      = useState('visible')
+  const [transitioning,     setTransitioning]     = useState(false) // 'visible'|'spinning'|'fading'|'done'
+  const [serviceMode,       setServiceMode]       = useState('day') // 'day' | 'night' | 'replacement'
+  const [replacementRoutes, setReplacementRoutes] = useState([])
+  const [viewMode,          setViewMode]          = useState('live') // 'live' | 'static'
+  const [heatmapVisible,    setHeatmapVisible]    = useState(false)
+  const [selectedRoute,     setSelectedRoute]     = useState(DEFAULT_ROUTE)
+  const [mapVisible,        setMapVisible]        = useState(true)
+  const [stopsVisible,      setStopsVisible]      = useState(true)
+  const [routeLineVisible,  setRouteLineVisible]  = useState(true)
+  const [routeStops,        setRouteStops]        = useState({})
+  const [routePolylines,    setRoutePolylines]    = useState({})
+  const [routeHeadways,     setRouteHeadways]     = useState({}) // { routeId: minutes | null }
+  const [animatedBuses,     setAnimatedBuses]     = useState([])
+  const [lastUpdated,       setLastUpdated]       = useState(null)
 
   const rawBusDataRef      = useRef({})
   const routePolylinesRef  = useRef({})
   const arrivalsTimerRef   = useRef(null)
 
-  const currentRoutes = isNightMode ? SUPPORTED_NIGHT_ROUTES : SUPPORTED_DAY_ROUTES
-  const isAllMode     = selectedRoute === 'all'
-  const isStaticView  = viewMode === 'static'
-  const tileUrl       = isNightMode ? NIGHT_TILE_URL : DAY_TILE_URL
-  const mapBg         = isNightMode ? '#0d1117' : '#ffffff'
+  const isNightMode       = serviceMode === 'night'
+  const isReplacementMode = serviceMode === 'replacement'
+  const currentRoutes     = isReplacementMode ? replacementRoutes
+    : isNightMode ? SUPPORTED_NIGHT_ROUTES
+    : SUPPORTED_DAY_ROUTES
+  const isAllMode    = selectedRoute === 'all'
+  const isStaticView = viewMode === 'static'
+  const tileUrl      = isNightMode ? NIGHT_TILE_URL : DAY_TILE_URL
+  const mapBg        = isNightMode ? '#0d1117' : '#ffffff'
 
-  // When the mode flips, always go back to all routes
+  // When the service mode flips, always go back to all routes
   useEffect(() => {
     setSelectedRoute(DEFAULT_ROUTE)
-  }, [isNightMode])
+  }, [serviceMode])
 
   // ── Dead reckoning tick — runs every second ───────────────────────────────
   useEffect(() => {
@@ -1126,9 +1174,24 @@ export default function App() {
     setTransitioning(true) // fade in the overlay to cover the old route
     if (arrivalsTimerRef.current) clearInterval(arrivalsTimerRef.current)
 
-    const routes = selectedRoute === 'all' ? currentRoutes : [selectedRoute]
-
     async function initialize() {
+      // In replacement mode, fetch the live list of replacement routes from TfL first.
+      let modeRoutes
+      if (isReplacementMode) {
+        const ids = await fetchReplacementRouteIds()
+        ids.forEach((id, i) => {
+          extraRouteColors[id]     = REPLACEMENT_DOT_PALETTE[i % REPLACEMENT_DOT_PALETTE.length]
+          extraRouteLineColors[id] = REPLACEMENT_LINE_PALETTE[i % REPLACEMENT_LINE_PALETTE.length]
+        })
+        setReplacementRoutes(ids)
+        modeRoutes = ids
+      } else {
+        modeRoutes = isNightMode ? SUPPORTED_NIGHT_ROUTES : SUPPORTED_DAY_ROUTES
+      }
+
+      const routes = selectedRoute === 'all' ? modeRoutes : [selectedRoute]
+      if (routes.length === 0) { setTransitioning(false); return }
+
       // Resolve geometry for each route — from cache if available, otherwise fetch.
       // Cache persists for the lifetime of the page so revisiting a route is instant.
       const geometries = await Promise.all(routes.map(async routeId => {
@@ -1179,10 +1242,6 @@ export default function App() {
               loadArrivals(routeId, outStops, inStops)
             )
           )
-          const currentIds = new Set(Object.keys(rawBusDataRef.current))
-          Object.keys(trailsRef.current).forEach(id => {
-            if (!currentIds.has(id)) delete trailsRef.current[id]
-          })
         }, ARRIVALS_REFRESH_INTERVAL_MS)
       }
     }
@@ -1192,7 +1251,7 @@ export default function App() {
     return () => {
       if (arrivalsTimerRef.current) clearInterval(arrivalsTimerRef.current)
     }
-  }, [selectedRoute, isNightMode, viewMode, loadArrivals])
+  }, [selectedRoute, serviceMode, viewMode, loadArrivals])
 
   const allOutboundStops  = Object.values(routeStops).flatMap(d => d.outboundStops)
   const allInboundStops   = Object.values(routeStops).flatMap(d => d.inboundStops)
@@ -1212,10 +1271,10 @@ export default function App() {
           selectedRoute={selectedRoute}
           onRouteChange={setSelectedRoute}
           availableRoutes={currentRoutes}
-          isNightMode={isNightMode}
+          serviceMode={serviceMode}
         />
 
-        <DigitalClock isNightMode={isNightMode} />
+        <DigitalClock serviceMode={serviceMode} />
 
         <MapContainer
           center={LONDON_CENTER}
@@ -1299,7 +1358,7 @@ export default function App() {
           mapVisible={mapVisible}            onToggleMap={() => setMapVisible(v => !v)}
           stopsVisible={stopsVisible}        onToggleStops={() => setStopsVisible(v => !v)}
           routeLineVisible={routeLineVisible} onToggleRouteLine={() => setRouteLineVisible(v => !v)}
-          isNightMode={isNightMode}          onToggleNight={() => setIsNightMode(v => !v)}
+          serviceMode={serviceMode}          onSetServiceMode={setServiceMode}
           viewMode={viewMode}               onToggleViewMode={() => setViewMode(v => v === 'live' ? 'static' : 'live')}
           heatmapVisible={heatmapVisible}   onToggleHeatmap={handleToggleHeatmap}
         />
@@ -1345,17 +1404,15 @@ const styles = {
 
   clock: {
     position: 'absolute', top: 20, right: 20, zIndex: 1000,
-    background: 'rgba(13,13,13,0.88)',
+    background: '#0d0d0d',
     borderRadius: 16, padding: '14px 20px',
     boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
     pointerEvents: 'none',
-    backdropFilter: 'blur(12px)',
-    WebkitBackdropFilter: 'blur(12px)',
     textAlign: 'right',
     minWidth: 160,
   },
   clockNight: {
-    background: 'rgba(10,10,26,0.92)',
+    background: '#0a0a1a',
     boxShadow: '0 4px 24px rgba(168,85,247,0.2), 0 2px 8px rgba(0,0,0,0.6)',
   },
   clockTimeRow: {
@@ -1390,6 +1447,16 @@ const styles = {
   nightBadge: {
     background: '#a855f7',
     color: '#fff',
+    fontSize: 12, fontWeight: 700,
+    fontFamily: 'Inter, system-ui, sans-serif',
+    borderRadius: 8, padding: '2px 8px',
+    letterSpacing: '0.06em',
+    flexShrink: 0,
+  },
+
+  replacementBadge: {
+    background: '#f59e0b',
+    color: '#000',
     fontSize: 12, fontWeight: 700,
     fontFamily: 'Inter, system-ui, sans-serif',
     borderRadius: 8, padding: '2px 8px',
