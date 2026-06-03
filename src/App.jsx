@@ -5,8 +5,8 @@ import 'leaflet/dist/leaflet.css'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const SUPPORTED_DAY_ROUTES   = ['3', '11', '22', '25', '33', '52', '53', '55', '72', '88', '101', '134', '149', '350', '370', '405', '465']
-const SUPPORTED_NIGHT_ROUTES  = ['N11', 'N25', 'N29', 'N38', 'N53', 'N55', 'N207']
+const SUPPORTED_DAY_ROUTES   = ['3', '9', '11', '15', '22', '25', '33', '38', '52', '53', '55', '72', '73', '88', '101', '134', '148', '149', '243', '350', '370', '405', '465']
+const SUPPORTED_NIGHT_ROUTES  = ['N8', 'N11', 'N22', 'N25', 'N29', 'N38', 'N53', 'N55', 'N133', 'N155', 'N207']
 const DEFAULT_ROUTE           = 'all'
 const ARRIVALS_REFRESH_INTERVAL_MS = 30_000
 const DEAD_RECKONING_TICK_MS  = 1_000
@@ -42,6 +42,13 @@ const ROUTE_COLORS = {
   '370': '#0f766e',  // far east Essex   — dark teal
   '405': '#7c3aed',  // far south Surrey — violet
   '465': '#dc2626',  // far south Surrey — crimson
+  // New day routes
+  '9':   '#0284c7',  // central/west — cerulean blue
+  '15':  '#be123c',  // east/city    — rose red
+  '38':  '#7e22ce',  // north/central— dark purple
+  '73':  '#854d0e',  // north/central— sienna brown
+  '148': '#166534',  // west/south   — deep forest green
+  '243': '#9f1239',  // north/central— burgundy
   // Night routes
   'N11': '#a855f7',  'N55': '#22d3ee',
   'N29': '#fb923c',  // north      — peach orange
@@ -49,6 +56,11 @@ const ROUTE_COLORS = {
   'N25': '#fbbf24',  // east       — amber gold
   'N53': '#60a5fa',  // southeast  — sky blue
   'N207':'#e879f9',  // west       — fuchsia
+  // New night routes
+  'N8':   '#6d28d9', // east       — deep violet
+  'N22':  '#15803d', // south      — dark green
+  'N133': '#0e7490', // south/city — dark cyan
+  'N155': '#9d174d', // south      — deep rose
 }
 
 // Per-route lighter colours — OSRM route lines
@@ -57,22 +69,29 @@ const ROUTE_LINE_COLORS = {
   '3':  '#f9a8d4', '25': '#6ee7b7', '134': '#a5b4fc',
   '52': '#fed7aa', '149': '#a5f3fc', '101': '#bbf7d0', '53': '#fbcfe8', '72': '#fef08a',
   '350': '#fcd34d', '370': '#99f6e4', '405': '#ddd6fe', '465': '#fca5a5',
+  '9':   '#7dd3fc', '15': '#fda4af', '38': '#e9d5ff', '73': '#fef3c7',
+  '148': '#86efac', '243': '#fecdd3',
   'N11': '#d8b4fe', 'N55': '#a5f3fc',
   'N29': '#fed7aa', 'N38': '#a7f3d0', 'N25': '#fde68a', 'N53': '#bfdbfe', 'N207': '#f5d0fe',
+  'N8':   '#ede9fe', 'N22': '#dcfce7', 'N133': '#cffafe', 'N155': '#fce7f3',
 }
 
 const ROUTE_DESTINATIONS = {
   'all': 'All Routes',
-  '11': 'Liverpool St',  '22': 'Piccadilly',      '33': 'Hammersmith',
-  '55': 'Oxford Circus', '88': 'Clapham Common',
-  '3':  'Crystal Palace','25': 'Ilford',           '134': 'High Barnet',
-  '52': 'Willesden',     '149': 'Edmonton',        '101': 'Gallions Reach',
+  '9':  'Aldwych',       '11': 'Liverpool St',     '15': 'Trafalgar Sq',
+  '22': 'Piccadilly',    '33': 'Hammersmith',
+  '38': 'Victoria',      '55': 'Oxford Circus',    '73': 'Victoria',
+  '88': 'Clapham Common',
+  '3':  'Crystal Palace','25': 'Ilford',            '134': 'High Barnet',
+  '52': 'Willesden',     '148': 'Camberwell Grn',  '149': 'Edmonton',
+  '101': 'Gallions Reach','243': 'Wood Green',
   '53': 'Plumstead',     '72': 'Roehampton',
-  '350': 'Lakeside',     '370': 'Grays',           '405': 'Redhill',
+  '350': 'Lakeside',     '370': 'Grays',            '405': 'Redhill',
   '465': 'Dorking',
-  'N11': 'Liverpool St', 'N55': 'Oxford Circus',
-  'N29': 'Wood Green',   'N38': 'Clapton',         'N25': 'Ilford',
-  'N53': 'Plumstead',    'N207': 'Uxbridge',
+  'N8':  'Hainault',     'N11': 'Liverpool St',     'N22': 'Crystal Palace',
+  'N25': 'Ilford',       'N29': 'Wood Green',       'N38': 'Clapton',
+  'N53': 'Plumstead',    'N55': 'Oxford Circus',    'N133': 'Streatham',
+  'N155': 'Tooting',     'N207': 'Uxbridge',
 }
 
 // London bus operating hours (approximate, for display only)
@@ -82,29 +101,39 @@ const NIGHT_SERVICE_HOURS = '00:00 – 06:00'
 // Notable places each route passes — stored as arrays for easy expansion
 const ROUTE_LANDMARKS = {
   '3':   ['Brixton Academy', 'Lambeth Palace', 'Crystal Palace Park'],
+  '9':   ['Kensington High Street', 'Hyde Park Corner', 'Aldwych'],
   '11':  ["King's Road Chelsea", 'Victoria Station', "St Paul's Cathedral"],
+  '15':  ['Whitechapel', 'Monument', 'Trafalgar Square'],
   '22':  ['Green Park', 'Hyde Park Corner', 'Sloane Square'],
   '25':  ["St Paul's Cathedral", 'Bank of England', 'Stratford'],
   '33':  ['Hammersmith Apollo', 'Chiswick House', 'Richmond Bridge'],
+  '38':  ['Angel Islington', 'Bloomsbury', 'Victoria Coach Station'],
   '52':  ['Notting Hill Gate', 'Ladbroke Grove', 'Kensal Rise'],
   '53':  ['Trafalgar Square', 'Elephant & Castle', 'Greenwich'],
   '55':  ['Oxford Circus', 'Bloomsbury', 'Old Street'],
   '72':  ["Shepherd's Bush", 'Hammersmith', 'Putney Bridge'],
+  '73':  ['Stoke Newington', 'Angel', 'Hyde Park Corner'],
   '88':  ['Clapham Common', 'Vauxhall', 'Trafalgar Square'],
   '101': ['Stratford Westfield', 'West Ham', 'Royal Docks'],
   '134': ['Archway', 'Highgate Village', 'East Finchley'],
+  '148': ["Shepherd's Bush", 'Notting Hill', 'Westminster Bridge'],
   '149': ['Liverpool Street', 'Stoke Newington', 'Tottenham'],
+  '243': ['Wood Green', 'Holloway Road', 'Waterloo Bridge'],
   '350': ['Romford Market', 'Hornchurch', 'Lakeside Shopping Centre'],
   '370': ['Lakeside', 'Tilbury Docks', 'Thames Estuary'],
   '405': ['East Croydon', 'Coulsdon', 'Redhill (Surrey)'],
   '465': ['Kingston upon Thames', 'Leatherhead', 'Dorking (beyond M25)'],
+  'N8':  ['Bethnal Green', 'Shoreditch High Street', 'Oxford Street'],
   'N11': ["King's Road", 'Westminster', 'Liverpool Street'],
+  'N22': ['Chelsea', 'Oxford Street', 'Crystal Palace'],
   'N25': ['Oxford Circus', 'Bank', 'Stratford'],
   'N29': ['Trafalgar Square', 'Finsbury Park', 'Wood Green'],
   'N38': ['Victoria', 'Hackney', 'Clapton'],
   'N53': ['Whitehall', 'Elephant & Castle', 'Plumstead'],
   'N55': ['Oxford Circus', 'Shoreditch', 'Leyton'],
-  'N207':['Shepherd\'s Bush', 'Ealing', 'Uxbridge'],
+  'N133':['Elephant & Castle', 'London Bridge', 'Streatham'],
+  'N155':['Oval', 'Kennington', 'Tooting Broadway'],
+  'N207':["Shepherd's Bush", 'Ealing', 'Uxbridge'],
 }
 
 // ─── TfL & OSRM API helpers ───────────────────────────────────────────────────
