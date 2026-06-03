@@ -102,6 +102,35 @@ const NIGHT_SERVICE_HOURS = '00:00 – 06:00'
 const REPLACEMENT_DOT_PALETTE  = ['#f59e0b','#ef4444','#8b5cf6','#06b6d4','#10b981','#f97316','#ec4899','#6366f1','#14b8a6','#a855f7']
 const REPLACEMENT_LINE_PALETTE = ['#fde68a','#fca5a5','#ddd6fe','#a5f3fc','#6ee7b7','#fed7aa','#fbcfe8','#c7d2fe','#99f6e4','#d8b4fe']
 
+// Official TfL tube line colours
+const TUBE_LINE_COLORS = {
+  'bakerloo':         '#B36305',
+  'central':          '#E32017',
+  'circle':           '#FFD300',
+  'district':         '#00782A',
+  'hammersmith-city': '#F3A9BB',
+  'jubilee':          '#A0A5A9',
+  'metropolitan':     '#9B0056',
+  'northern':         '#1C1C1C',
+  'piccadilly':       '#003688',
+  'victoria':         '#0098D4',
+  'waterloo-city':    '#95CDBA',
+}
+
+const TUBE_LINE_SHORT = {
+  'bakerloo':         'Bakerloo',
+  'central':          'Central',
+  'circle':           'Circle',
+  'district':         'District',
+  'hammersmith-city': 'H & City',
+  'jubilee':          'Jubilee',
+  'metropolitan':     'Metropolitan',
+  'northern':         'Northern',
+  'piccadilly':       'Piccadilly',
+  'victoria':         'Victoria',
+  'waterloo-city':    'W & City',
+}
+
 // Notable places each route passes — stored as arrays for easy expansion
 const ROUTE_LANDMARKS = {
   '3':   ['Brixton Academy', 'Lambeth Palace', 'Crystal Palace Park'],
@@ -182,6 +211,18 @@ async function fetchOsrmRoute(stops) {
   } catch {
     return null
   }
+}
+
+async function fetchTubeStatus() {
+  const res = await fetch('https://api.tfl.gov.uk/Line/Mode/tube/Status')
+  if (!res.ok) throw new Error('Tube status fetch failed')
+  const lines = await res.json()
+  return lines.map(line => ({
+    id:          line.id,
+    name:        TUBE_LINE_SHORT[line.id] || line.name,
+    severity:    line.lineStatuses?.[0]?.statusSeverity ?? 10,
+    description: line.lineStatuses?.[0]?.statusSeverityDescription ?? 'Unknown',
+  }))
 }
 
 async function fetchReplacementRouteIds() {
@@ -821,6 +862,34 @@ function HeatmapLegend({ routeHeadways, loadedRouteIds }) {
   )
 }
 
+// ─── Tube status chip ─────────────────────────────────────────────────────────
+
+function TubeStatusChip({ tubeStatus }) {
+  if (!tubeStatus || tubeStatus.length === 0) return null
+
+  return (
+    <div style={styles.tubeChip}>
+      <div style={styles.tubeChipTitle}>Tube Status</div>
+      <div style={styles.factDivider} />
+      {tubeStatus.map(line => {
+        const isGood   = line.severity >= 10
+        const isSevere = line.severity < 7
+        const statusColor = isGood ? 'rgba(255,255,255,0.28)' : isSevere ? '#ef4444' : '#f59e0b'
+        const dotBg = TUBE_LINE_COLORS[line.id] || '#888'
+        return (
+          <div key={line.id} style={styles.tubeLineRow}>
+            <span style={{ ...styles.tubeLineDot, background: dotBg }} />
+            <span style={styles.tubeLineName}>{line.name}</span>
+            <span style={{ ...styles.tubeLineStatus, color: statusColor }}>
+              {isGood ? '✓' : line.description}
+            </span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ─── Digital clock ────────────────────────────────────────────────────────────
 
 function DigitalClock({ serviceMode }) {
@@ -1073,6 +1142,7 @@ export default function App() {
   const [routeHeadways,     setRouteHeadways]     = useState({}) // { routeId: minutes | null }
   const [animatedBuses,     setAnimatedBuses]     = useState([])
   const [lastUpdated,       setLastUpdated]       = useState(null)
+  const [tubeStatus,        setTubeStatus]        = useState([])
 
   const rawBusDataRef      = useRef({})
   const routePolylinesRef  = useRef({})
@@ -1092,6 +1162,16 @@ export default function App() {
   useEffect(() => {
     setSelectedRoute(DEFAULT_ROUTE)
   }, [serviceMode])
+
+  // ── Tube status — fetch on mount, refresh every 60 s ─────────────────────
+  useEffect(() => {
+    async function load() {
+      try { setTubeStatus(await fetchTubeStatus()) } catch {}
+    }
+    load()
+    const interval = setInterval(load, 60_000)
+    return () => clearInterval(interval)
+  }, [])
 
   // ── Dead reckoning tick — runs every second ───────────────────────────────
   useEffect(() => {
@@ -1274,7 +1354,10 @@ export default function App() {
           serviceMode={serviceMode}
         />
 
-        <DigitalClock serviceMode={serviceMode} />
+        <div style={styles.rightColumn}>
+          <DigitalClock serviceMode={serviceMode} />
+          <TubeStatusChip tubeStatus={tubeStatus} />
+        </div>
 
         <MapContainer
           center={LONDON_CENTER}
@@ -1402,12 +1485,17 @@ const styles = {
 
   // ── Digital clock ──────────────────────────────────────────────────────────
 
-  clock: {
+  rightColumn: {
     position: 'absolute', top: 20, right: 20, zIndex: 1000,
+    display: 'flex', flexDirection: 'column', gap: 12,
+    pointerEvents: 'none',
+    alignItems: 'flex-end',
+  },
+
+  clock: {
     background: '#0d0d0d',
     borderRadius: 16, padding: '14px 20px',
     boxShadow: '0 4px 24px rgba(0,0,0,0.4)',
-    pointerEvents: 'none',
     textAlign: 'right',
     minWidth: 160,
   },
@@ -1440,6 +1528,34 @@ const styles = {
     fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
     fontSize: 16, fontWeight: 500, letterSpacing: '0.02em',
     color: 'rgba(255,255,255,0.75)',
+  },
+
+  // ── Tube status chip ───────────────────────────────────────────────────────
+
+  tubeChip: {
+    background: '#0d0d0d', borderRadius: 14, padding: '12px 16px',
+    boxShadow: '0 4px 20px rgba(0,0,0,0.35)',
+    minWidth: 200,
+  },
+  tubeChipTitle: {
+    fontSize: 10, fontWeight: 600, letterSpacing: '0.1em',
+    textTransform: 'uppercase', color: 'rgba(255,255,255,0.35)',
+    fontFamily: 'Inter, system-ui, sans-serif', marginBottom: 8,
+  },
+  tubeLineRow: {
+    display: 'flex', alignItems: 'center', gap: 8, padding: '2px 0',
+  },
+  tubeLineDot: {
+    width: 8, height: 8, borderRadius: '50%', flexShrink: 0, display: 'inline-block',
+  },
+  tubeLineName: {
+    fontSize: 12, color: 'rgba(255,255,255,0.7)',
+    fontFamily: 'Inter, system-ui, sans-serif', flex: 1,
+  },
+  tubeLineStatus: {
+    fontSize: 11, fontWeight: 500,
+    fontFamily: 'Inter, system-ui, sans-serif',
+    textAlign: 'right', flexShrink: 0,
   },
 
   // ── Night badge ────────────────────────────────────────────────────────────
