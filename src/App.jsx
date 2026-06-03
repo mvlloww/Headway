@@ -102,7 +102,7 @@ const NIGHT_SERVICE_HOURS = '00:00 – 06:00'
 const REPLACEMENT_DOT_PALETTE  = ['#f59e0b','#ef4444','#8b5cf6','#06b6d4','#10b981','#f97316','#ec4899','#6366f1','#14b8a6','#a855f7']
 const REPLACEMENT_LINE_PALETTE = ['#fde68a','#fca5a5','#ddd6fe','#a5f3fc','#6ee7b7','#fed7aa','#fbcfe8','#c7d2fe','#99f6e4','#d8b4fe']
 
-// Official TfL tube line colours
+// Official TfL tube + Elizabeth line colours
 const TUBE_LINE_COLORS = {
   'bakerloo':         '#B36305',
   'central':          '#E32017',
@@ -115,6 +115,7 @@ const TUBE_LINE_COLORS = {
   'piccadilly':       '#003688',
   'victoria':         '#0098D4',
   'waterloo-city':    '#95CDBA',
+  'elizabeth':        '#6950A1',
 }
 
 const TUBE_LINE_SHORT = {
@@ -129,7 +130,14 @@ const TUBE_LINE_SHORT = {
   'piccadilly':       'Piccadilly',
   'victoria':         'Victoria',
   'waterloo-city':    'W & City',
+  'elizabeth':        'Elizabeth',
 }
+
+const TUBE_LINE_IDS = [
+  'bakerloo', 'central', 'circle', 'district', 'hammersmith-city',
+  'jubilee', 'metropolitan', 'northern', 'piccadilly', 'victoria',
+  'waterloo-city', 'elizabeth',
+]
 
 // Notable places each route passes — stored as arrays for easy expansion
 const ROUTE_LANDMARKS = {
@@ -214,15 +222,45 @@ async function fetchOsrmRoute(stops) {
 }
 
 async function fetchTubeStatus() {
-  const res = await fetch('https://api.tfl.gov.uk/Line/Mode/tube/Status')
+  const res = await fetch('https://api.tfl.gov.uk/Line/Mode/tube,elizabeth-line/Status')
   if (!res.ok) throw new Error('Tube status fetch failed')
   const lines = await res.json()
-  return lines.map(line => ({
-    id:          line.id,
-    name:        TUBE_LINE_SHORT[line.id] || line.name,
-    severity:    line.lineStatuses?.[0]?.statusSeverity ?? 10,
-    description: line.lineStatuses?.[0]?.statusSeverityDescription ?? 'Unknown',
-  }))
+  return lines
+    .filter(l => TUBE_LINE_IDS.includes(l.id))
+    .map(line => ({
+      id:          line.id,
+      name:        TUBE_LINE_SHORT[line.id] || line.name,
+      severity:    line.lineStatuses?.[0]?.statusSeverity ?? 10,
+      description: line.lineStatuses?.[0]?.statusSeverityDescription ?? 'Unknown',
+    }))
+}
+
+async function fetchStrikeNotices() {
+  try {
+    const today = new Date()
+    const fmt   = d => d.toISOString().split('T')[0]
+    const end   = fmt(new Date(today.getTime() + 14 * 86_400_000))
+    const res   = await fetch(
+      `https://api.tfl.gov.uk/Line/Mode/tube,elizabeth-line/Status/${fmt(today)}/${end}`
+    )
+    if (!res.ok) return []
+    const lines = await res.json()
+    const notices = []
+    lines.forEach(line => {
+      line.lineStatuses?.forEach(status => {
+        const reason = status.reason || ''
+        if (!reason) return
+        const lo = reason.toLowerCase()
+        if (lo.includes('industrial action') || lo.includes('strike') ||
+            lo.includes('rmt') || lo.includes('aslef') || lo.includes('tssa')) {
+          notices.push(`${line.name}: ${reason.trim()}`)
+        }
+      })
+    })
+    return notices
+  } catch {
+    return []
+  }
 }
 
 async function fetchReplacementRouteIds() {
@@ -862,6 +900,81 @@ function HeatmapLegend({ routeHeadways, loadedRouteIds }) {
   )
 }
 
+// ─── Tube mode blind (replaces destination blind in tube view) ───────────────
+
+function TubeModeBlind({ isNightMode }) {
+  return (
+    <div style={styles.blindFloatRow}>
+      <div style={{
+        ...styles.blindPill,
+        background: isNightMode ? '#0a0a1a' : '#0d0d0d',
+        boxShadow: isNightMode
+          ? '0 8px 32px rgba(168,85,247,0.25), 0 2px 8px rgba(0,0,0,0.6)'
+          : '0 8px 32px rgba(0,0,0,0.45)',
+      }}>
+        <div style={styles.tubeRoundel}>
+          <div style={styles.tubeRoundelBar} />
+        </div>
+        <div style={styles.blindDestinationSection}>
+          <span style={styles.blindDestinationText}>London Underground</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Strike ticker ────────────────────────────────────────────────────────────
+
+function StrikeTicker({ notices }) {
+  const items  = notices === null ? ['Loading strike information…']
+    : notices.length > 0 ? notices
+    : ['No upcoming industrial action planned', 'All lines operating normally', 'Data sourced from TfL API']
+
+  const text = items.join('  ·  ')
+  const full = `${text}  ·  ${text}`  // doubled for seamless loop
+
+  const color = notices && notices.length > 0 ? '#ef4444' : 'rgba(255,255,255,0.45)'
+  const label = notices && notices.length > 0 ? '⚠ STRIKE' : 'ALERTS'
+  const labelColor = notices && notices.length > 0 ? '#ef4444' : 'rgba(255,255,255,0.3)'
+
+  return (
+    <div style={styles.tickerContainer}>
+      <span style={{ ...styles.tickerLabel, color: labelColor }}>{label}</span>
+      <div style={styles.tickerTrack}>
+        <span className="strike-ticker" style={{ ...styles.tickerText, color }}>{full}</span>
+      </div>
+    </div>
+  )
+}
+
+// ─── Tube heatmap legend ──────────────────────────────────────────────────────
+
+const TUBE_STATUS_SCALE = [
+  { color: null,      label: 'Good Service',   desc: 'Official line colour' },
+  { color: '#f59e0b', label: 'Delays',          desc: '' },
+  { color: '#ef4444', label: 'Severe / Closed', desc: '' },
+]
+
+function TubeHeatmapLegend({ tubeStatus }) {
+  const disrupted = tubeStatus.filter(l => l.severity < 10).length
+  return (
+    <div style={styles.legend}>
+      <div style={styles.legendTitle}>Line Status</div>
+      {TUBE_STATUS_SCALE.map(({ color, label }) => (
+        <div key={label} style={styles.legendRow}>
+          <div style={{ width: 24, height: 4, borderRadius: 2, background: color || '#6950A1', flexShrink: 0 }} />
+          <span style={styles.legendText}>{label}</span>
+        </div>
+      ))}
+      {disrupted > 0 && (
+        <div style={{ ...styles.heatmapNoDataNote, color: '#f59e0b' }}>
+          {disrupted} line{disrupted > 1 ? 's' : ''} with disruptions
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Tube status chip ─────────────────────────────────────────────────────────
 
 function TubeStatusChip({ tubeStatus }) {
@@ -1063,6 +1176,28 @@ function SunIcon() {
   )
 }
 
+// Bus — bus mode
+function BusIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="5" width="20" height="13" rx="2"/>
+      <path d="M2 10h20"/>
+      <circle cx="7" cy="20" r="1.5" fill="currentColor" stroke="none"/>
+      <circle cx="17" cy="20" r="1.5" fill="currentColor" stroke="none"/>
+    </svg>
+  )
+}
+
+// Tube roundel — tube mode
+function TubeIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="1.8"/>
+      <rect x="2" y="9.5" width="20" height="5" rx="1" fill="currentColor"/>
+    </svg>
+  )
+}
+
 // Wrench — rail replacement mode
 function WrenchIcon() {
   return (
@@ -1072,31 +1207,44 @@ function WrenchIcon() {
   )
 }
 
-function ControlsPanel({ mapVisible, onToggleMap, stopsVisible, onToggleStops,
+function ControlsPanel({ appMode, onSetAppMode,
+                          mapVisible, onToggleMap, stopsVisible, onToggleStops,
                           routeLineVisible, onToggleRouteLine, serviceMode, onSetServiceMode,
                           viewMode, onToggleViewMode, heatmapVisible, onToggleHeatmap }) {
   const isNightMode       = serviceMode === 'night'
   const isReplacementMode = serviceMode === 'replacement'
+  const isBusMode  = appMode === 'bus'
+  const isTubeMode = appMode === 'tube'
   return (
     <div style={styles.controlsPanel}>
-      <IconButton
-        active={viewMode === 'live'}
-        onClick={onToggleViewMode}
-        title={viewMode === 'live' ? 'Switch to static view' : 'Switch to live view'}
-      >
-        {viewMode === 'live' ? <LiveIcon /> : <StaticIcon />}
-      </IconButton>
-      <IconButton active={heatmapVisible} onClick={onToggleHeatmap} title="Frequency heatmap">
-        <HeatmapIcon />
-      </IconButton>
-      <IconButton active={mapVisible}         onClick={onToggleMap}         title="Map tiles"><GlobeIcon /></IconButton>
-      <IconButton active={stopsVisible}       onClick={onToggleStops}       title="Bus stops"><StopsIcon /></IconButton>
-      <IconButton active={routeLineVisible}   onClick={onToggleRouteLine}   title="Route line"><RouteIcon /></IconButton>
-      <IconButton active={isReplacementMode}  onClick={() => onSetServiceMode(isReplacementMode ? 'day' : 'replacement')}
-        title={isReplacementMode ? 'Exit rail replacement' : 'Rail replacement buses'}>
-        <WrenchIcon />
-      </IconButton>
-      <IconButton active={isNightMode}        onClick={() => onSetServiceMode(isNightMode ? 'day' : 'night')}
+      {/* Mode toggle */}
+      <IconButton active={isBusMode}  onClick={() => onSetAppMode('bus')}  title="Bus mode"><BusIcon /></IconButton>
+      <IconButton active={isTubeMode} onClick={() => onSetAppMode('tube')} title="Tube mode"><TubeIcon /></IconButton>
+      <div style={styles.controlsDivider} />
+
+      {/* Bus-only controls */}
+      {isBusMode && <>
+        <IconButton
+          active={viewMode === 'live'}
+          onClick={onToggleViewMode}
+          title={viewMode === 'live' ? 'Switch to static view' : 'Switch to live view'}
+        >
+          {viewMode === 'live' ? <LiveIcon /> : <StaticIcon />}
+        </IconButton>
+        <IconButton active={heatmapVisible} onClick={onToggleHeatmap} title="Frequency heatmap">
+          <HeatmapIcon />
+        </IconButton>
+        <IconButton active={stopsVisible}     onClick={onToggleStops}     title="Bus stops"><StopsIcon /></IconButton>
+        <IconButton active={routeLineVisible} onClick={onToggleRouteLine} title="Route line"><RouteIcon /></IconButton>
+        <IconButton active={isReplacementMode} onClick={() => onSetServiceMode(isReplacementMode ? 'day' : 'replacement')}
+          title={isReplacementMode ? 'Exit rail replacement' : 'Rail replacement buses'}>
+          <WrenchIcon />
+        </IconButton>
+      </>}
+
+      {/* Shared controls */}
+      <IconButton active={mapVisible} onClick={onToggleMap} title="Map tiles"><GlobeIcon /></IconButton>
+      <IconButton active={isNightMode} onClick={() => onSetServiceMode(isNightMode ? 'day' : 'night')}
         title={isNightMode ? 'Switch to day' : 'Switch to night'}>
         {isNightMode ? <SunIcon /> : <MoonIcon />}
       </IconButton>
@@ -1124,6 +1272,9 @@ const geometryCache = new Map()
 const extraRouteColors     = {}
 const extraRouteLineColors = {}
 
+// Tube line geometry cache — straight-line stop sequences, no OSRM.
+const tubeGeometryCache = new Map()
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -1143,6 +1294,9 @@ export default function App() {
   const [animatedBuses,     setAnimatedBuses]     = useState([])
   const [lastUpdated,       setLastUpdated]       = useState(null)
   const [tubeStatus,        setTubeStatus]        = useState([])
+  const [appMode,           setAppMode]           = useState('bus') // 'bus' | 'tube'
+  const [tubePolylines,     setTubePolylines]     = useState({})
+  const [strikeNotices,     setStrikeNotices]     = useState(null) // null = loading
 
   const rawBusDataRef      = useRef({})
   const routePolylinesRef  = useRef({})
@@ -1171,6 +1325,43 @@ export default function App() {
     load()
     const interval = setInterval(load, 60_000)
     return () => clearInterval(interval)
+  }, [])
+
+  // ── Tube geometry — load once when tube mode first opens ──────────────────
+  useEffect(() => {
+    if (appMode !== 'tube') return
+    if (tubeGeometryCache.size === TUBE_LINE_IDS.length) {
+      // already cached from a previous visit — restore from cache
+      const restored = {}
+      tubeGeometryCache.forEach((poly, id) => { if (poly) restored[id] = poly })
+      setTubePolylines(restored)
+      return
+    }
+    setTransitioning(true)
+    async function load() {
+      const entries = await Promise.all(TUBE_LINE_IDS.map(async id => {
+        if (tubeGeometryCache.has(id)) return [id, tubeGeometryCache.get(id)]
+        try {
+          const stops = await fetchStopSequence(id, 'outbound')
+          const poly  = stopsToPolyline(stops)
+          tubeGeometryCache.set(id, poly)
+          return [id, poly]
+        } catch {
+          tubeGeometryCache.set(id, null)
+          return [id, null]
+        }
+      }))
+      const map = {}
+      entries.forEach(([id, poly]) => { if (poly) map[id] = poly })
+      setTubePolylines(map)
+      setTransitioning(false)
+    }
+    load()
+  }, [appMode])
+
+  // ── Strike notices — fetch once on mount (14-day look-ahead) ─────────────
+  useEffect(() => {
+    fetchStrikeNotices().then(setStrikeNotices)
   }, [])
 
   // ── Dead reckoning tick — runs every second ───────────────────────────────
@@ -1347,12 +1538,15 @@ export default function App() {
   return (
     <div style={styles.appWrapper}>
       <div style={styles.mapWrapper}>
-        <DestinationBlind
-          selectedRoute={selectedRoute}
-          onRouteChange={setSelectedRoute}
-          availableRoutes={currentRoutes}
-          serviceMode={serviceMode}
-        />
+        {appMode === 'bus'  && (
+          <DestinationBlind
+            selectedRoute={selectedRoute}
+            onRouteChange={setSelectedRoute}
+            availableRoutes={currentRoutes}
+            serviceMode={serviceMode}
+          />
+        )}
+        {appMode === 'tube' && <TubeModeBlind isNightMode={isNightMode} />}
 
         <div style={styles.rightColumn}>
           <DigitalClock serviceMode={serviceMode} />
@@ -1376,68 +1570,80 @@ export default function App() {
           {/* Clicking empty map canvas resets to all-routes */}
           <MapClickHandler onClickEmpty={() => setSelectedRoute('all')} />
 
-          {/* Route polylines — heatmap colours when active, normal colours otherwise */}
-          {(heatmapVisible || isStaticView || routeLineVisible) && Object.entries(routePolylines).map(([routeId, positions]) => {
-            let lineColor, lineOpacity, lineWeight
-            if (heatmapVisible) {
-              const headwayColor = getHeadwayColor(routeHeadways[routeId])
-              lineColor   = headwayColor ?? '#aaaaaa'
-              lineOpacity = headwayColor ? 1 : 0.3
-              lineWeight  = 5
-            } else {
-              lineColor   = getRouteLineColor(routeId, isAllMode, viewMode)
-              lineOpacity = 1
-              lineWeight  = isStaticView ? 4 : 2
-            }
+          {/* ── Bus mode map content ── */}
+          {appMode === 'bus' && <>
+            {(heatmapVisible || isStaticView || routeLineVisible) && Object.entries(routePolylines).map(([routeId, positions]) => {
+              let lineColor, lineOpacity, lineWeight
+              if (heatmapVisible) {
+                const headwayColor = getHeadwayColor(routeHeadways[routeId])
+                lineColor   = headwayColor ?? '#aaaaaa'
+                lineOpacity = headwayColor ? 1 : 0.3
+                lineWeight  = 5
+              } else {
+                lineColor   = getRouteLineColor(routeId, isAllMode, viewMode)
+                lineOpacity = 1
+                lineWeight  = isStaticView ? 4 : 2
+              }
+              return (
+                <React.Fragment key={routeId}>
+                  <Polyline positions={positions}
+                    pathOptions={{ color: lineColor, opacity: lineOpacity, weight: lineWeight, lineCap: 'round' }} />
+                  <Polyline positions={positions}
+                    bubblingMouseEvents={false}
+                    eventHandlers={{ click: () => setSelectedRoute(routeId) }}
+                    pathOptions={{ opacity: 0.001, weight: 16, color: '#000' }} />
+                </React.Fragment>
+              )
+            })}
+            {stopsVisible && allOutboundStops.map(stop => (
+              <CircleMarker key={`out-${stop.id}`} center={[stop.lat, stop.lon]} radius={2.5}
+                bubblingMouseEvents={false}
+                pathOptions={{ color: isNightMode ? '#555' : '#bbb', fillColor: isNightMode ? '#555' : '#bbb', fillOpacity: 1, weight: 0 }} />
+            ))}
+            {stopsVisible && allInboundStops.map(stop => (
+              <CircleMarker key={`in-${stop.id}`} center={[stop.lat, stop.lon]} radius={2.5}
+                bubblingMouseEvents={false}
+                pathOptions={{ color: isNightMode ? '#555' : '#bbb', fillColor: isNightMode ? '#555' : '#bbb', fillOpacity: 1, weight: 0 }} />
+            ))}
+            {!isStaticView && !heatmapVisible && animatedBuses.map(bus => (
+              <BusDot key={bus.vehicleId} {...bus} isAllMode={isAllMode} isBunched={bunchedIds.has(bus.vehicleId)} />
+            ))}
+          </>}
+
+          {/* ── Tube mode map content — lines colored by service status ── */}
+          {appMode === 'tube' && Object.entries(tubePolylines).map(([lineId, positions]) => {
+            const entry    = tubeStatus.find(t => t.id === lineId)
+            const severity = entry?.severity ?? 10
+            const color    = severity >= 10 ? (TUBE_LINE_COLORS[lineId] || '#888')
+              : severity >= 7 ? '#f59e0b'
+              : '#ef4444'
+            const opacity  = severity < 7 ? 0.55 : 1
             return (
-              <React.Fragment key={routeId}>
-                <Polyline positions={positions}
-                  pathOptions={{ color: lineColor, opacity: lineOpacity, weight: lineWeight, lineCap: 'round' }} />
-                <Polyline positions={positions}
-                  bubblingMouseEvents={false}
-                  eventHandlers={{ click: () => setSelectedRoute(routeId) }}
-                  pathOptions={{ opacity: 0.001, weight: 16, color: '#000' }} />
-              </React.Fragment>
+              <Polyline key={lineId} positions={positions}
+                pathOptions={{ color, opacity, weight: 5, lineCap: 'round', lineJoin: 'round' }} />
             )
           })}
-
-          {stopsVisible && allOutboundStops.map(stop => (
-            <CircleMarker key={`out-${stop.id}`} center={[stop.lat, stop.lon]} radius={2.5}
-              bubblingMouseEvents={false}
-              pathOptions={{ color: isNightMode ? '#555' : '#bbb', fillColor: isNightMode ? '#555' : '#bbb', fillOpacity: 1, weight: 0 }} />
-          ))}
-          {stopsVisible && allInboundStops.map(stop => (
-            <CircleMarker key={`in-${stop.id}`} center={[stop.lat, stop.lon]} radius={2.5}
-              bubblingMouseEvents={false}
-              pathOptions={{ color: isNightMode ? '#555' : '#bbb', fillColor: isNightMode ? '#555' : '#bbb', fillOpacity: 1, weight: 0 }} />
-          ))}
-
-          {/* Live-only (and heatmap off): bus dots */}
-          {!isStaticView && !heatmapVisible && animatedBuses.map(bus => (
-            <BusDot
-              key={bus.vehicleId}
-              {...bus}
-              isAllMode={isAllMode}
-              isBunched={bunchedIds.has(bus.vehicleId)}
-            />
-          ))}
         </MapContainer>
 
-        <RouteFacts
-          selectedRoute={selectedRoute}
-          isAllMode={isAllMode}
-          routeStops={routeStops}
-          routePolylines={routePolylines}
-          animatedBuses={animatedBuses}
-          currentRoutes={currentRoutes}
-        />
-
-        {!isStaticView && !heatmapVisible && <Legend />}
-        {heatmapVisible && (
-          <HeatmapLegend routeHeadways={routeHeadways} loadedRouteIds={loadedRouteIds} />
+        {appMode === 'bus' && (
+          <RouteFacts
+            selectedRoute={selectedRoute}
+            isAllMode={isAllMode}
+            routeStops={routeStops}
+            routePolylines={routePolylines}
+            animatedBuses={animatedBuses}
+            currentRoutes={currentRoutes}
+          />
         )}
 
+        {appMode === 'bus' && !isStaticView && !heatmapVisible && <Legend />}
+        {appMode === 'bus' && heatmapVisible && (
+          <HeatmapLegend routeHeadways={routeHeadways} loadedRouteIds={loadedRouteIds} />
+        )}
+        {appMode === 'tube' && <TubeHeatmapLegend tubeStatus={tubeStatus} />}
+
         <ControlsPanel
+          appMode={appMode}                  onSetAppMode={setAppMode}
           mapVisible={mapVisible}            onToggleMap={() => setMapVisible(v => !v)}
           stopsVisible={stopsVisible}        onToggleStops={() => setStopsVisible(v => !v)}
           routeLineVisible={routeLineVisible} onToggleRouteLine={() => setRouteLineVisible(v => !v)}
@@ -1445,6 +1651,8 @@ export default function App() {
           viewMode={viewMode}               onToggleViewMode={() => setViewMode(v => v === 'live' ? 'static' : 'live')}
           heatmapVisible={heatmapVisible}   onToggleHeatmap={handleToggleHeatmap}
         />
+
+        {appMode === 'tube' && <StrikeTicker notices={strikeNotices} />}
 
         {/* Transition overlay — fades in on route change, out once geometry is ready */}
         <div style={{
@@ -1782,5 +1990,49 @@ const styles = {
   popupVehicle: {
     marginTop: 10, paddingTop: 10, borderTop: '1px solid #ebebeb',
     fontSize: 12, color: '#aaa', fontVariantNumeric: 'tabular-nums',
+  },
+
+  // ── Controls divider ───────────────────────────────────────────────────────
+
+  controlsDivider: {
+    width: 1, height: 28, background: 'rgba(0,0,0,0.12)', flexShrink: 0, alignSelf: 'center',
+  },
+
+  // ── Tube mode blind (roundel) ──────────────────────────────────────────────
+
+  tubeRoundel: {
+    width: 36, height: 36, borderRadius: '50%',
+    border: '4px solid #E32017', background: '#003399',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    flexShrink: 0, position: 'relative', overflow: 'hidden',
+  },
+  tubeRoundelBar: {
+    position: 'absolute', left: -4, right: -4, height: 10,
+    background: '#E32017',
+  },
+
+  // ── Strike ticker ──────────────────────────────────────────────────────────
+
+  tickerContainer: {
+    position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 1000,
+    background: '#0d0d0d',
+    borderTop: '1px solid rgba(255,255,255,0.08)',
+    padding: '7px 16px',
+    display: 'flex', alignItems: 'center', gap: 14,
+    overflow: 'hidden',
+    pointerEvents: 'none',
+    height: 34,
+  },
+  tickerLabel: {
+    fontSize: 10, fontWeight: 700, letterSpacing: '0.1em',
+    fontFamily: 'Inter, system-ui, sans-serif',
+    flexShrink: 0, userSelect: 'none',
+  },
+  tickerTrack: {
+    flex: 1, overflow: 'hidden', position: 'relative',
+  },
+  tickerText: {
+    fontSize: 12, fontFamily: 'Inter, system-ui, sans-serif',
+    letterSpacing: '0.01em',
   },
 }
